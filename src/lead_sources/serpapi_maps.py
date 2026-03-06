@@ -54,7 +54,6 @@ def search_google_maps(query: str, max_results: int = 50) -> list[dict[str, Any]
             break
 
         start += SERPAPI_PAGE_SIZE
-
     return leads[:max_results]
 
 
