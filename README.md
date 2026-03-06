@@ -4,7 +4,7 @@ An end-to-end AI pipeline that discovers local businesses, analyzes their websit
 
 This project demonstrates how AI agents can automate parts of the B2B lead generation workflow.
 
---------------------------
+---
 
 # Overview
 
@@ -31,114 +31,125 @@ This system automatically:
 5. **Applies contactability checks**
    - Flags leads that require manual review.
 
---------------------------
+---
 
 # Pipeline Architecture
 
-Lead Discovery
-↓
-Website Enrichment
-↓
-AI Lead Scoring
-↓
-AI Outreach Generation
-↓
-Contactability Review
+```mermaid
+flowchart TD
+    A[Lead Discovery<br/>SerpAPI Google Maps] --> B[Website Enrichment<br/>Requests + BeautifulSoup]
+    B --> C[AI Lead Scoring<br/>OpenAI]
+    C --> D[AI Outreach Generation<br/>OpenAI]
+    D --> E[Contactability Review<br/>Rule-based checks]
+
+    A --> A1[data/leads_raw.csv]
+    B --> B1[data/leads_enriched.csv]
+    C --> C1[data/leads_scored.csv]
+    D --> D1[data/leads_outreach.csv]
+    E --> E1[data/leads_ready.csv]
+```
 
 Outputs are saved as CSV datasets at each stage.
 
---------------------------
+---
 
 # Project Structure
 
+```text
 ai-lead-generation-agents/
-│
 ├── data/
-│ ├── leads_raw.csv
-│ ├── leads_enriched.csv
-│ ├── leads_scored.csv
-│ ├── leads_outreach.csv
-│ └── leads_ready.csv
-│
+│   ├── leads_raw.csv
+│   ├── leads_enriched.csv
+│   ├── leads_scored.csv
+│   ├── leads_outreach.csv
+│   └── leads_ready.csv
 ├── scripts/
-│ ├── run_lead_discovery.py
-│ ├── run_enrichment.py
-│ ├── run_scoring.py
-│ ├── run_outreach.py
-│ ├── run_contactability.py
-│ └── run_pipeline.py
-│
+│   ├── run_lead_discovery.py
+│   ├── run_enrichment.py
+│   ├── run_scoring.py
+│   ├── run_outreach.py
+│   ├── run_contactability.py
+│   └── run_pipeline.py
 ├── src/
-│ ├── lead_sources/
-│ ├── enrichment/
-│ ├── scoring/
-│ └── outreach/
-│
+│   ├── lead_sources/
+│   │   └── serpapi_maps.py
+│   ├── enrichment/
+│   │   └── website_enricher.py
+│   ├── scoring/
+│   │   └── lead_scorer.py
+│   └── outreach/
+│       ├── email_generator.py
+│       └── contactability.py
 ├── .env.example
 ├── requirements.txt
-└── README.md
+├── README.md
+└── LICENSE
+```
 
---------------------------
+---
 
 # Setup
 
 ## 1. Clone the repository
 
+```bash
 git clone https://github.com/paureis/ai-lead-generation-agents.git
 cd ai-lead-generation-agents
+```
 
---------------------------
+---
 
 ## 2. Install dependencies
 
+```bash
 pip install -r requirements.txt
+```
 
---------------------------
+---
 
 ## 3. Configure API keys
 
 Create a `.env` file in the project root.
 
+```bash
 OPENAI_API_KEY=<your_key_here>
 SERPAPI_API_KEY=<your_key_here>
+```
 
 You can copy the template:
 
+```bash
 cp .env.example .env
+```
 
---------------------------
-
-# Running the Pipeline
-
-Run the full pipeline with one command:
-
---------------------------
+---
 
 # Running the Pipeline
 
 Run the full pipeline with one command:
 
+```bash
 python scripts/run_pipeline.py
-
+```
 
 This will automatically execute:
 
-1. Lead discovery
-2. Website enrichment
-3. AI scoring
-4. Outreach generation
-5. Contactability review
+1. Lead discovery  
+2. Website enrichment  
+3. AI scoring  
+4. Outreach generation  
+5. Contactability review  
 
---------------------------
+---
 
 # Example Output
 
 Example generated lead:
 
-Business: Miami Dental Group
-Score: 6
+Business: Miami Dental Group  
+Score: 6  
 
-Opportunity:
+Opportunity:  
 Add a live chat feature to capture more patient inquiries.
 
 Generated Outreach Email:
@@ -149,7 +160,7 @@ I noticed your practice has a strong online reputation with over 1,000 reviews. 
 
 I'd be happy to share a few ideas if you're open to it.
 
---------------------------
+---
 
 # Technologies Used
 
@@ -160,7 +171,7 @@ I'd be happy to share a few ideas if you're open to it.
 - BeautifulSoup
 - Requests
 
---------------------------
+---
 
 # Future Improvements
 
@@ -174,7 +185,7 @@ Potential extensions:
 - dashboard UI
 - automated niche discovery
 
---------------------------
+---
 
 # License
 
