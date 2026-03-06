@@ -1,0 +1,7 @@
+openai
+pandas
+requests
+beautifulsoup4
+python-dotenv
+streamlit
+tldextract
