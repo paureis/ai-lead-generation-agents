@@ -40,38 +40,50 @@ def generate_outreach(lead: dict[str, Any], model: str = "gpt-4o-mini") -> dict[
     return _normalize_outreach(parsed)
 
 
-def generate_outreach_batch(
-    leads: list[dict[str, Any]],
-    limit: int | None = None,
-    sleep_seconds: float = 0.5,
-) -> list[dict[str, Any]]:
-    """Generate outreach for a lead batch, appending outreach fields to each row."""
-    max_items = len(leads) if limit is None else max(0, min(limit, len(leads)))
-    enriched: list[dict[str, Any]] = []
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
-    for index, lead in enumerate(leads[:max_items]):
-        row = dict(lead)
+def generate_outreach_batch(
+    leads: list[dict],
+    limit: int | None = None,
+    sleep_seconds: float = 0.0,
+    max_workers: int = 6,
+) -> list[dict]:
+    max_items = len(leads) if limit is None else min(limit, len(leads))
+    selected = leads[:max_items]
+
+    results = [None] * len(selected)
+
+    def _safe_generate(index, lead):
+        base = dict(lead)
         try:
-            outreach = generate_outreach(lead)
-            row.update(outreach)
-            row["outreach_error"] = None
-        except Exception as exc:  # Defensive: continue batch on model/API failures.
-            row.update(
+            generated = generate_outreach(lead)
+            base.update(generated)
+            base["outreach_error"] = None
+            return index, base
+        except Exception as e:
+            base.update(
                 {
                     "subject": "",
                     "email": "",
                     "cta": "",
                     "followup_1": "",
                     "followup_2": "",
-                    "outreach_error": str(exc),
+                    "outreach_error": str(e),
                 }
             )
-        enriched.append(row)
+            return index, base
 
-        if sleep_seconds > 0 and index < max_items - 1:
-            time.sleep(sleep_seconds)
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [
+            executor.submit(_safe_generate, idx, lead)
+            for idx, lead in enumerate(selected)
+        ]
 
-    return enriched
+        for future in as_completed(futures):
+            index, result = future.result()
+            results[index] = result
+
+    return [r for r in results if r is not None]
 
 
 def _get_openai_client() -> OpenAI:
@@ -95,6 +107,14 @@ def _build_user_prompt(lead: dict[str, Any]) -> str:
         "has_contact_form": lead.get("has_contact_form"),
         "has_chat_widget": lead.get("has_chat_widget"),
         "tech_hints": lead.get("tech_hints"),
+        "tech_stack": lead.get("tech_stack"),
+        "missing_features": lead.get("missing_features"),
+        "feature_summary": lead.get("feature_summary"),
+        "has_title": lead.get("has_title"),
+        "has_meta_description": lead.get("has_meta_description"),
+        "has_h1": lead.get("has_h1"),
+        "has_image_alt_text": lead.get("has_image_alt_text"),
+        "seo_summary": lead.get("seo_summary"),
         "score": lead.get("score"),
         "reasoning": lead.get("reasoning"),
         "opportunity": lead.get("opportunity"),
@@ -107,8 +127,13 @@ def _build_user_prompt(lead: dict[str, Any]) -> str:
         "Rules:\n"
         "- Be concise, natural, and specific.\n"
         "- Mention something relevant from the site or business.\n"
+        "- Prefer concrete observations from feature_summary, missing_features, opportunity, reasoning, or homepage_text.\n"
+        "- seo_summary can be used as a secondary personalization angle, especially when the issue is simple and clearly visible.\n"
+        "- If feature_summary clearly identifies missing booking, contact form, or live chat, use that as the primary personalization angle.\n"
         "- Focus on one clear benefit tied to the opportunity.\n"
+        "- Prefer conversion-related issues first; use SEO issues when they are the clearest visible opportunity.\n"
         "- Avoid hype or spammy phrasing.\n"
+        "- Do not invent problems that are not supported by the lead data.\n"
         "- Return only JSON with keys: subject, email, cta, followup_1, followup_2.\n\n"
         f"Lead data:\n{json.dumps(payload, ensure_ascii=False)}"
     )
