@@ -708,6 +708,8 @@ def _render_export_controls(filtered_df: pd.DataFrame, export_mode: str):
             "seo_summary",
             "has_meta_description",
             "best_contact_email",
+            "contact_email_quality",
+            "contact_email_score",
             "contact_page_url",
             "subject",
             "email",
@@ -733,6 +735,8 @@ def _render_export_controls(filtered_df: pd.DataFrame, export_mode: str):
             "seo_summary",
             "has_meta_description",
             "best_contact_email",
+            "contact_email_quality",
+            "contact_email_score",
             "contact_page_url",
             "contactability_status",
         ]
@@ -755,6 +759,8 @@ def _render_export_controls(filtered_df: pd.DataFrame, export_mode: str):
             "missing_features",
             "seo_summary",
             "best_contact_email",
+            "contact_email_quality",
+            "contact_email_score",
             "contact_page_url",
         ]
         export_df = export_df[[c for c in crm_columns if c in export_df.columns]].copy()
@@ -812,6 +818,8 @@ def render_full_results(results, export_mode: str):
         feature_summary = lead.get("feature_summary", "")
         seo_summary = lead.get("seo_summary", "")
         best_contact_email = lead.get("best_contact_email", "")
+        contact_email_quality = lead.get("contact_email_quality", "none")
+        contact_email_score = lead.get("contact_email_score", 0)
 
         score_color = _score_badge_color(score)
         status_color = _status_badge_color(status)
@@ -856,6 +864,12 @@ def render_full_results(results, export_mode: str):
                     <strong>Contact Email:</strong> {best_contact_email if best_contact_email else "Not found"}
                 </div>
                 <div style="margin-bottom:10px;">
+                    <strong>Contact Email Quality:</strong> {contact_email_quality if contact_email_quality else "none"}
+                </div>
+                <div style="margin-bottom:10px;">
+                    <strong>Contact Email Score:</strong> {contact_email_score}
+                </div>
+                <div style="margin-bottom:10px;">
                     <strong>Website:</strong> <a href="{website}" target="_blank">{website}</a>
                 </div>
                 <div>
@@ -883,6 +897,8 @@ def render_full_results(results, export_mode: str):
             feature_summary = lead.get("feature_summary", "")
             seo_summary = lead.get("seo_summary", "")
             best_contact_email = lead.get("best_contact_email", "")
+            contact_email_quality = lead.get("contact_email_quality", "none")
+            contact_email_score = lead.get("contact_email_score", 0)
 
             score_color = _score_badge_color(score)
             status_color = _status_badge_color(status)
@@ -927,6 +943,12 @@ def render_full_results(results, export_mode: str):
                     <strong>Contact Email:</strong> {best_contact_email if best_contact_email else "Not found"}
                     </div>
                     <div style="margin-bottom:10px;">
+                        <strong>Contact Email Quality:</strong> {contact_email_quality if contact_email_quality else "none"}
+                    </div>
+                    <div style="margin-bottom:10px;">
+                        <strong>Contact Email Score:</strong> {contact_email_score}
+                    </div>
+                    <div style="margin-bottom:10px;">
                         <strong>Website:</strong> <a href="{website}" target="_blank">{website}</a>
                     </div>
                     <div>
@@ -968,6 +990,12 @@ def render_full_results(results, export_mode: str):
 
                 st.write("**Best Contact Email**")
                 st.write(lead.get("best_contact_email", "") or "Not found")
+
+                st.write("**Contact Email Quality**")
+                st.write(lead.get("contact_email_quality", "") or "none")
+
+                st.write("**Contact Email Score**")
+                st.write(lead.get("contact_email_score", 0))
 
                 st.write("**Contact Page URL**")
                 st.write(lead.get("contact_page_url", "") or "Not found")

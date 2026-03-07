@@ -137,6 +137,66 @@ def choose_best_contact_email(emails: list[str]) -> str:
     return unique_emails[0]
 
 
+def score_contact_email(email: str) -> dict[str, Any]:
+    """Score a single contact email for outreach usefulness."""
+    normalized = str(email or "").strip().lower()
+    if not normalized:
+        return {
+            "contact_email_quality": "none",
+            "contact_email_score": 0,
+        }
+
+    prefix_score_map = {
+        "owner@": 10,
+        "founder@": 10,
+        "ceo@": 10,
+        "president@": 9,
+        "dr@": 9,
+        "doctor@": 9,
+        "dentist@": 9,
+        "attorney@": 9,
+        "lawyer@": 9,
+        "hello@": 7,
+        "team@": 7,
+        "office@": 7,
+        "sales@": 6,
+        "contact@": 6,
+        "info@": 5,
+        "admin@": 4,
+        "support@": 3,
+        "service@": 3,
+        "help@": 3,
+        "noreply@": 1,
+        "no-reply@": 1,
+        "donotreply@": 1,
+        "do-not-reply@": 1,
+        "booking@": 2,
+        "billing@": 2,
+        "careers@": 1,
+        "hr@": 1,
+    }
+
+    score = 5
+    for prefix, prefix_score in prefix_score_map.items():
+        if normalized.startswith(prefix):
+            score = prefix_score
+            break
+
+    if score >= 8:
+        quality = "high"
+    elif score >= 4:
+        quality = "medium"
+    elif score >= 1:
+        quality = "low"
+    else:
+        quality = "none"
+
+    return {
+        "contact_email_quality": quality,
+        "contact_email_score": score,
+    }
+
+
 def extract_contact_emails_from_site(
     website: str,
     homepage_html: str,
@@ -375,6 +435,8 @@ def enrich_lead(lead: dict[str, Any]) -> dict[str, Any]:
                 "contact_emails": [],
                 "best_contact_email": "",
                 "contact_page_url": "",
+                "contact_email_quality": "none",
+                "contact_email_score": 0,
             }
         )
         return enriched
@@ -385,8 +447,7 @@ def enrich_lead(lead: dict[str, Any]) -> dict[str, Any]:
     signals = detect_signals(html or "", homepage_text)
     seo_signals = detect_seo_signals(html or "")
     contact_data = extract_contact_emails_from_site(website, html or "", homepage_text)
-    
-    
+    contact_quality = score_contact_email(str(contact_data.get("best_contact_email", "") or ""))
 
     has_booking = bool(signals.get("has_booking", False))
     has_contact_form = bool(signals.get("has_contact_form", False))
@@ -417,6 +478,8 @@ def enrich_lead(lead: dict[str, Any]) -> dict[str, Any]:
             "contact_emails": list(contact_data.get("contact_emails", [])),
             "best_contact_email": str(contact_data.get("best_contact_email", "") or ""),
             "contact_page_url": str(contact_data.get("contact_page_url", "") or ""),
+            "contact_email_quality": str(contact_quality.get("contact_email_quality", "none") or "none"),
+            "contact_email_score": int(contact_quality.get("contact_email_score", 0) or 0),
         }
     )
     return enriched
@@ -466,6 +529,8 @@ def enrich_leads(
                     "contact_emails": [],
                     "best_contact_email": "",
                     "contact_page_url": "",
+                    "contact_email_quality": "none",
+                    "contact_email_score": 0,
                 }
             )
             return index, fallback
