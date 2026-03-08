@@ -1264,7 +1264,7 @@ def _render_map_section(prepared_map_df: pd.DataFrame):
         map_df.at[idx, "longitude"] = lon
         map_df.at[idx, "geocode_quality"] = quality
 
-        plotted_df = map_df.dropna(subset=["latitude", "longitude"]).copy()
+    plotted_df = map_df.dropna(subset=["latitude", "longitude"]).copy()
 
     if plotted_df.empty:
         st.info(
@@ -1364,7 +1364,6 @@ def render_pipeline_results(results):
     outreach_subset = results.get("outreach_subset", [])
     ready_count = results.get("ready_count", 0)
     review_count = results.get("review_count", 0)
-    timings = results.get("timings", {})
     search_pairs = results.get("search_pairs", [])
     filtered_df = _ensure_dataframe(results.get("filtered_df"))
     map_df = _ensure_dataframe(results.get("map_df"))
@@ -1379,13 +1378,6 @@ def render_pipeline_results(results):
     m4.metric("Outreach Generated", f"{len(outreach_subset)} / {len(scored_leads)}")
     m5.metric("Ready", ready_count)
     m6.metric("Review", review_count)
-
-    st.markdown("---")
-    st.subheader("Stage Timings")
-    timing_df = pd.DataFrame(
-        [{"Stage": stage, "Seconds": round(seconds, 2)} for stage, seconds in timings.items()]
-    )
-    st.dataframe(timing_df, use_container_width=True, hide_index=True)
 
     _render_map_section(map_df)
 
@@ -1528,17 +1520,7 @@ def render_full_results(results, export_mode: str):
         queue_df["score_numeric"] = pd.to_numeric(queue_df["score"], errors="coerce").fillna(0)
         queue_df = queue_df.sort_values(by="score_numeric", ascending=False)
 
-    if queue_df.empty:
-        visible_queue_df = queue_df.copy()
-    else:
-        queue_limit = st.slider(
-            "Queue Size",
-            min_value=5,
-            max_value=50,
-            value=10,
-            key="outreach_queue_limit",
-        )
-        visible_queue_df = queue_df.head(int(queue_limit)).copy()
+    visible_queue_df = queue_df.copy()
 
     approval_state = st.session_state.setdefault("outreach_approval_state", {})
     approval_state_changed = False
@@ -1723,88 +1705,6 @@ def render_full_results(results, export_mode: str):
     s3.metric("Ready For Review", ready_for_review_count)
     s4.metric("Total Visible Queue", total_visible_queue)
 
-    if st.button(
-        "Mark Visible Approved as Queued To Send",
-        use_container_width=True,
-        key="mark_visible_approved_queued_to_send",
-        disabled=visible_queue_df.empty,
-    ):
-        queued_now = datetime.now().isoformat()
-        queued_count = 0
-        for lead in visible_queue_df.to_dict(orient="records"):
-            lead_state_key = _outreach_approval_key(lead)
-            lead_state = approval_state.get(lead_state_key, {})
-            current_visible_state = visible_queue_state.get(lead_state_key, {})
-            if not current_visible_state.get("approved_to_send", False):
-                continue
-            if str(current_visible_state.get("workflow_status", "")).strip().lower() == "sent":
-                continue
-
-            previous_state = dict(lead_state)
-            lead_state["workflow_status"] = "queued_to_send"
-            if not str(lead_state.get("approved_at", "") or ""):
-                lead_state["approved_at"] = queued_now
-            if not str(lead_state.get("queued_to_send_at", "") or ""):
-                lead_state["queued_to_send_at"] = queued_now
-
-            approval_state[lead_state_key] = lead_state
-            current_visible_state["workflow_status"] = "queued_to_send"
-            current_visible_state["approved_at"] = str(lead_state.get("approved_at", "") or "")
-            current_visible_state["queued_to_send_at"] = str(
-                lead_state.get("queued_to_send_at", "") or ""
-            )
-            visible_queue_state[lead_state_key] = current_visible_state
-            if previous_state != lead_state:
-                approval_state_changed = True
-            queued_count += 1
-
-        if queued_count > 0:
-            st.success(f"Queued {queued_count} visible approved lead(s) for future sending.")
-        else:
-            st.info("No visible approved leads to queue.")
-
-    if st.button(
-        "Simulate Send for Visible Queued Leads",
-        use_container_width=True,
-        key="simulate_send_visible_queued_leads",
-        disabled=visible_queue_df.empty,
-    ):
-        sent_now = datetime.now().isoformat()
-        sent_count = 0
-        for lead in visible_queue_df.to_dict(orient="records"):
-            lead_state_key = _outreach_approval_key(lead)
-            lead_state = approval_state.get(lead_state_key, {})
-            current_visible_state = visible_queue_state.get(lead_state_key, {})
-            if str(current_visible_state.get("workflow_status", "")).strip().lower() != "queued_to_send":
-                continue
-
-            previous_state = dict(lead_state)
-            lead_state["workflow_status"] = "sent"
-            lead_state["send_status"] = "sent"
-            lead_state["sent_at"] = sent_now
-            lead_state["reply_status"] = "no_reply"
-            lead_state["replied_at"] = ""
-            lead_state["interest_status"] = "unknown"
-            lead_state["meeting_booked_at"] = ""
-
-            approval_state[lead_state_key] = lead_state
-            current_visible_state["workflow_status"] = "sent"
-            current_visible_state["send_status"] = "sent"
-            current_visible_state["sent_at"] = sent_now
-            current_visible_state["reply_status"] = "no_reply"
-            current_visible_state["replied_at"] = ""
-            current_visible_state["interest_status"] = "unknown"
-            current_visible_state["meeting_booked_at"] = ""
-            visible_queue_state[lead_state_key] = current_visible_state
-            if previous_state != lead_state:
-                approval_state_changed = True
-            sent_count += 1
-
-        if sent_count > 0:
-            st.success(f"Simulated send for {sent_count} visible queued lead(s).")
-        else:
-            st.info("No visible queued leads to simulate send.")
-
     approved_export_rows = []
     for lead in visible_queue_df.to_dict(orient="records"):
         lead_state = visible_queue_state.get(_outreach_approval_key(lead), {})
@@ -1853,424 +1753,6 @@ def render_full_results(results, export_mode: str):
         use_container_width=True,
         key="download_approved_outreach_csv",
     )
-
-    lifecycle_rows = []
-    for lead_key, base_state in approval_state.items():
-        normalized_lead_key = _normalize_outreach_approval_key(lead_key)
-        if not normalized_lead_key:
-            continue
-        state_snapshot = dict(base_state)
-        if lead_key in visible_queue_state:
-            state_snapshot.update(visible_queue_state[lead_key])
-        elif normalized_lead_key in visible_queue_state:
-            state_snapshot.update(visible_queue_state[normalized_lead_key])
-
-        approved_to_send = bool(state_snapshot.get("approved_to_send", False))
-        skip_this_lead = bool(state_snapshot.get("skip_this_lead", False))
-        if approved_to_send:
-            skip_this_lead = False
-
-        workflow_status = str(state_snapshot.get("workflow_status", "") or "").strip().lower()
-        if workflow_status not in {"pending", "approved", "skipped", "queued_to_send", "sent"}:
-            if approved_to_send:
-                workflow_status = "approved"
-            elif skip_this_lead:
-                workflow_status = "skipped"
-            else:
-                workflow_status = "pending"
-
-        send_status = str(state_snapshot.get("send_status", "") or "").strip().lower()
-        if send_status not in {"not_sent", "sent"}:
-            send_status = "sent" if workflow_status == "sent" else "not_sent"
-        if workflow_status == "sent":
-            send_status = "sent"
-        elif send_status != "sent":
-            send_status = "not_sent"
-
-        reply_status = str(state_snapshot.get("reply_status", "no_reply") or "no_reply").strip().lower()
-        interest_status = str(
-            state_snapshot.get("interest_status", "unknown") or "unknown"
-        ).strip().lower()
-        replied_at = str(state_snapshot.get("replied_at", "") or "")
-        meeting_booked_at = str(state_snapshot.get("meeting_booked_at", "") or "")
-        if workflow_status != "sent":
-            reply_status = "no_reply"
-            replied_at = ""
-            interest_status = "unknown"
-            meeting_booked_at = ""
-        else:
-            if reply_status not in {"no_reply", "replied"}:
-                reply_status = "no_reply"
-            if interest_status not in {"unknown", "interested", "not_interested", "meeting_booked"}:
-                interest_status = "unknown"
-            if interest_status in {"interested", "not_interested", "meeting_booked"}:
-                reply_status = "replied"
-            if reply_status != "replied":
-                replied_at = ""
-                interest_status = "unknown"
-            if interest_status != "meeting_booked":
-                meeting_booked_at = ""
-
-        lifecycle_rows.append(
-            {
-                "lead_key": normalized_lead_key,
-                "name": str(state_snapshot.get("name", "") or ""),
-                "search_city": str(state_snapshot.get("search_city", "") or ""),
-                "best_contact_email": str(state_snapshot.get("best_contact_email", "") or ""),
-                "website_opportunity_score": int(
-                    pd.to_numeric(state_snapshot.get("website_opportunity_score"), errors="coerce")
-                    if pd.notna(
-                        pd.to_numeric(state_snapshot.get("website_opportunity_score"), errors="coerce")
-                    )
-                    else 0
-                ),
-                "website_opportunity_label": str(
-                    state_snapshot.get("website_opportunity_label", "low_opportunity")
-                    or "low_opportunity"
-                ),
-                "workflow_status": workflow_status,
-                "send_status": send_status,
-                "reply_status": reply_status,
-                "replied_at": replied_at,
-                "interest_status": interest_status,
-                "meeting_booked_at": meeting_booked_at,
-                "approved_at": str(state_snapshot.get("approved_at", "") or ""),
-                "queued_to_send_at": str(state_snapshot.get("queued_to_send_at", "") or ""),
-                "sent_at": str(state_snapshot.get("sent_at", "") or ""),
-                "last_reviewed_at": str(state_snapshot.get("last_reviewed_at", "") or ""),
-            }
-        )
-
-    lifecycle_df_full = pd.DataFrame(lifecycle_rows)
-    if not lifecycle_df_full.empty:
-        lifecycle_df_full["_meeting_booked_at_dt"] = pd.to_datetime(
-            lifecycle_df_full["meeting_booked_at"], errors="coerce"
-        )
-        lifecycle_df_full["_replied_at_dt"] = pd.to_datetime(
-            lifecycle_df_full["replied_at"], errors="coerce"
-        )
-        lifecycle_df_full["_sent_at_dt"] = pd.to_datetime(lifecycle_df_full["sent_at"], errors="coerce")
-        lifecycle_df_full["_queued_to_send_at_dt"] = pd.to_datetime(
-            lifecycle_df_full["queued_to_send_at"], errors="coerce"
-        )
-        lifecycle_df_full["_approved_at_dt"] = pd.to_datetime(
-            lifecycle_df_full["approved_at"], errors="coerce"
-        )
-        lifecycle_df_full["_last_reviewed_at_dt"] = pd.to_datetime(
-            lifecycle_df_full["last_reviewed_at"], errors="coerce"
-        )
-        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_meeting_booked_at_dt"]
-        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
-            lifecycle_df_full["_replied_at_dt"]
-        )
-        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
-            lifecycle_df_full["_sent_at_dt"]
-        )
-        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
-            lifecycle_df_full["_queued_to_send_at_dt"]
-        )
-        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
-            lifecycle_df_full["_approved_at_dt"]
-        )
-        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
-            lifecycle_df_full["_last_reviewed_at_dt"]
-        )
-        lifecycle_df_full = lifecycle_df_full.sort_values(
-            by="_effective_latest_ts",
-            ascending=False,
-            na_position="last",
-        )
-        lifecycle_df_full = lifecycle_df_full.drop_duplicates(subset=["lead_key"], keep="first")
-
-    st.markdown("---")
-    st.subheader("Outreach Lifecycle Dashboard")
-
-    lifecycle_filtered_df = lifecycle_df_full.copy()
-    workflow_options = (
-        sorted(lifecycle_df_full["workflow_status"].dropna().astype(str).str.strip().unique().tolist())
-        if not lifecycle_df_full.empty
-        else []
-    )
-    send_options = (
-        sorted(lifecycle_df_full["send_status"].dropna().astype(str).str.strip().unique().tolist())
-        if not lifecycle_df_full.empty
-        else []
-    )
-    reply_options = (
-        sorted(lifecycle_df_full["reply_status"].dropna().astype(str).str.strip().unique().tolist())
-        if not lifecycle_df_full.empty
-        else []
-    )
-    interest_options = (
-        sorted(lifecycle_df_full["interest_status"].dropna().astype(str).str.strip().unique().tolist())
-        if not lifecycle_df_full.empty
-        else []
-    )
-    city_options = (
-        sorted(
-            {
-                str(value).strip()
-                for value in lifecycle_df_full["search_city"].dropna().tolist()
-                if str(value).strip()
-            }
-        )
-        if not lifecycle_df_full.empty
-        else []
-    )
-
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
-    with filter_col1:
-        selected_workflow = st.multiselect(
-            "Workflow Status",
-            options=workflow_options,
-            default=workflow_options,
-            key="lifecycle_filter_workflow_status",
-        )
-        selected_send = st.multiselect(
-            "Send Status",
-            options=send_options,
-            default=send_options,
-            key="lifecycle_filter_send_status",
-        )
-    with filter_col2:
-        selected_reply = st.multiselect(
-            "Reply Status",
-            options=reply_options,
-            default=reply_options,
-            key="lifecycle_filter_reply_status",
-        )
-        selected_interest = st.multiselect(
-            "Interest Status",
-            options=interest_options,
-            default=interest_options,
-            key="lifecycle_filter_interest_status",
-        )
-    with filter_col3:
-        selected_cities = st.multiselect(
-            "Cities",
-            options=city_options,
-            default=city_options,
-            key="lifecycle_filter_cities",
-        )
-        name_search = st.text_input(
-            "Name Search",
-            value="",
-            key="lifecycle_filter_name_search",
-            placeholder="Optional business name contains...",
-        ).strip()
-
-    if not lifecycle_filtered_df.empty:
-        lifecycle_filtered_df = lifecycle_filtered_df[
-            lifecycle_filtered_df["workflow_status"].isin(selected_workflow)
-        ].copy()
-        lifecycle_filtered_df = lifecycle_filtered_df[
-            lifecycle_filtered_df["send_status"].isin(selected_send)
-        ].copy()
-        lifecycle_filtered_df = lifecycle_filtered_df[
-            lifecycle_filtered_df["reply_status"].isin(selected_reply)
-        ].copy()
-        lifecycle_filtered_df = lifecycle_filtered_df[
-            lifecycle_filtered_df["interest_status"].isin(selected_interest)
-        ].copy()
-        if city_options:
-            lifecycle_filtered_df = lifecycle_filtered_df[
-                lifecycle_filtered_df["search_city"].fillna("").astype(str).str.strip().isin(selected_cities)
-            ].copy()
-        if name_search:
-            lifecycle_filtered_df = lifecycle_filtered_df[
-                lifecycle_filtered_df["name"]
-                .fillna("")
-                .astype(str)
-                .str.contains(name_search, case=False, regex=False)
-            ].copy()
-
-    st.caption(
-        f"Showing {len(lifecycle_filtered_df)} filtered lifecycle row(s) out of {len(lifecycle_df_full)} total."
-    )
-
-    lifecycle_counts = {
-        "pending": 0,
-        "approved": 0,
-        "skipped": 0,
-        "queued_to_send": 0,
-        "sent": 0,
-    }
-    if not lifecycle_filtered_df.empty:
-        status_counts = lifecycle_filtered_df["workflow_status"].value_counts().to_dict()
-        for status_key in lifecycle_counts:
-            lifecycle_counts[status_key] = int(status_counts.get(status_key, 0))
-
-    d1, d2, d3, d4, d5 = st.columns(5)
-    d1.metric("Pending", lifecycle_counts.get("pending", 0))
-    d2.metric("Approved", lifecycle_counts.get("approved", 0))
-    d3.metric("Skipped", lifecycle_counts.get("skipped", 0))
-    d4.metric("Queued To Send", lifecycle_counts.get("queued_to_send", 0))
-    d5.metric("Sent", lifecycle_counts.get("sent", 0))
-    if not lifecycle_filtered_df.empty:
-        replied_count = int((lifecycle_filtered_df["reply_status"] == "replied").sum())
-        interested_count = int((lifecycle_filtered_df["interest_status"] == "interested").sum())
-        not_interested_count = int(
-            (lifecycle_filtered_df["interest_status"] == "not_interested").sum()
-        )
-        meetings_booked_count = int(
-            (lifecycle_filtered_df["interest_status"] == "meeting_booked").sum()
-        )
-    else:
-        replied_count = 0
-        interested_count = 0
-        not_interested_count = 0
-        meetings_booked_count = 0
-
-    r1, r2, r3, r4 = st.columns(4)
-    r1.metric("Replied", replied_count)
-    r2.metric("Interested", interested_count)
-    r3.metric("Not Interested", not_interested_count)
-    r4.metric("Meetings Booked", meetings_booked_count)
-
-    lifecycle_columns = [
-        "name",
-        "search_city",
-        "best_contact_email",
-        "website_opportunity_score",
-        "website_opportunity_label",
-        "workflow_status",
-        "send_status",
-        "reply_status",
-        "replied_at",
-        "interest_status",
-        "meeting_booked_at",
-        "approved_at",
-        "queued_to_send_at",
-        "sent_at",
-    ]
-    lifecycle_table_df = lifecycle_filtered_df.head(20).copy()
-    lifecycle_action_keys = (
-        lifecycle_table_df["lead_key"].fillna("").astype(str).tolist()
-        if not lifecycle_table_df.empty
-        else []
-    )
-    action_col1, action_col2, action_col3 = st.columns(3)
-    with action_col1:
-        clear_reply_clicked = st.button(
-            "Clear Reply State",
-            use_container_width=True,
-            key="lifecycle_action_clear_reply_state",
-            disabled=len(lifecycle_action_keys) == 0,
-        )
-    with action_col2:
-        reset_sent_clicked = st.button(
-            "Reset to Sent",
-            use_container_width=True,
-            key="lifecycle_action_reset_to_sent",
-            disabled=len(lifecycle_action_keys) == 0,
-        )
-    with action_col3:
-        reset_approved_clicked = st.button(
-            "Reset to Approved",
-            use_container_width=True,
-            key="lifecycle_action_reset_to_approved",
-            disabled=len(lifecycle_action_keys) == 0,
-        )
-
-    if clear_reply_clicked or reset_sent_clicked or reset_approved_clicked:
-        action_now = datetime.now().isoformat()
-        updated_rows = 0
-        for row_key in lifecycle_action_keys:
-            target_key = _normalize_outreach_approval_key(row_key)
-            if not target_key:
-                continue
-
-            state_key = target_key if target_key in approval_state else None
-            if state_key is None:
-                for existing_key in approval_state.keys():
-                    if _normalize_outreach_approval_key(existing_key) == target_key:
-                        state_key = existing_key
-                        break
-            if state_key is None:
-                continue
-
-            lead_state = dict(approval_state.get(state_key, {}))
-            previous_state = dict(lead_state)
-            lead_state.setdefault("approved_to_send", False)
-            lead_state.setdefault("skip_this_lead", False)
-            lead_state.setdefault("workflow_status", "pending")
-            lead_state.setdefault("send_status", "not_sent")
-            lead_state.setdefault("sent_at", "")
-            lead_state.setdefault("approved_at", "")
-            lead_state.setdefault("queued_to_send_at", "")
-            lead_state.setdefault("reply_status", "no_reply")
-            lead_state.setdefault("replied_at", "")
-            lead_state.setdefault("interest_status", "unknown")
-            lead_state.setdefault("meeting_booked_at", "")
-            lead_state.setdefault("website_opportunity_score", 0)
-            lead_state.setdefault("website_opportunity_label", "low_opportunity")
-            lead_state.setdefault("review_status", "pending")
-
-            if clear_reply_clicked:
-                lead_state["reply_status"] = "no_reply"
-                lead_state["interest_status"] = "unknown"
-                lead_state["replied_at"] = ""
-                lead_state["meeting_booked_at"] = ""
-            elif reset_sent_clicked:
-                lead_state["workflow_status"] = "sent"
-                lead_state["send_status"] = "sent"
-                lead_state["sent_at"] = str(lead_state.get("sent_at") or "") or action_now
-                lead_state["reply_status"] = "no_reply"
-                lead_state["interest_status"] = "unknown"
-                lead_state["replied_at"] = ""
-                lead_state["meeting_booked_at"] = ""
-                lead_state["approved_to_send"] = True
-                lead_state["skip_this_lead"] = False
-                lead_state["review_status"] = "approved"
-                lead_state["approved_at"] = str(lead_state.get("approved_at") or "") or action_now
-            elif reset_approved_clicked:
-                lead_state["workflow_status"] = "approved"
-                lead_state["send_status"] = "not_sent"
-                lead_state["sent_at"] = ""
-                lead_state["queued_to_send_at"] = ""
-                lead_state["reply_status"] = "no_reply"
-                lead_state["interest_status"] = "unknown"
-                lead_state["replied_at"] = ""
-                lead_state["meeting_booked_at"] = ""
-                lead_state["approved_to_send"] = True
-                lead_state["skip_this_lead"] = False
-                lead_state["review_status"] = "approved"
-                lead_state["approved_at"] = str(lead_state.get("approved_at") or "") or action_now
-
-            if lead_state != previous_state:
-                lead_state["last_reviewed_at"] = action_now
-                approval_state[state_key] = lead_state
-                st.session_state[f"queue_approve_{state_key}"] = bool(
-                    lead_state.get("approved_to_send", False)
-                )
-                st.session_state[f"queue_skip_{state_key}"] = bool(
-                    lead_state.get("skip_this_lead", False)
-                )
-                visible_state = visible_queue_state.get(state_key, {})
-                if visible_state:
-                    visible_state["workflow_status"] = lead_state.get("workflow_status", "pending")
-                    visible_state["send_status"] = lead_state.get("send_status", "not_sent")
-                    visible_state["sent_at"] = lead_state.get("sent_at", "")
-                    visible_state["approved_at"] = lead_state.get("approved_at", "")
-                    visible_state["queued_to_send_at"] = lead_state.get("queued_to_send_at", "")
-                    visible_state["reply_status"] = lead_state.get("reply_status", "no_reply")
-                    visible_state["replied_at"] = lead_state.get("replied_at", "")
-                    visible_state["interest_status"] = lead_state.get("interest_status", "unknown")
-                    visible_state["meeting_booked_at"] = lead_state.get("meeting_booked_at", "")
-                    visible_queue_state[state_key] = visible_state
-                updated_rows += 1
-
-        if updated_rows > 0:
-            save_outreach_approval_state(approval_state)
-            st.success(f"Applied lifecycle action to {updated_rows} filtered row(s).")
-        else:
-            st.info("No filtered rows were updated.")
-
-    if lifecycle_table_df.empty:
-        st.caption("No outreach lifecycle activity saved yet.")
-    else:
-        lifecycle_df = lifecycle_table_df[lifecycle_columns].copy()
-        st.dataframe(lifecycle_df, use_container_width=True, hide_index=True)
 
     st.markdown("---")
     st.subheader("Outreach Queue")
@@ -3048,8 +2530,6 @@ with st.sidebar:
     )
     max_results = st.number_input("Max Leads", min_value=1, max_value=100, value=5)
     outreach_limit = st.number_input("Outreach Limit", min_value=1, max_value=100, value=5)
-    min_score = st.slider("Minimum AI Score", min_value=1, max_value=10, value=5)
-    max_score = st.slider("Maximum AI Score", min_value=min_score, max_value=10, value=10)
     min_opportunity_score = st.slider(
         "Minimum Opportunity Score",
         min_value=0,
@@ -3060,19 +2540,6 @@ with st.sidebar:
     require_missing_booking = st.checkbox("Require Missing Booking", value=False)
     require_missing_live_chat = st.checkbox("Require Missing Live Chat", value=False)
     require_website = st.checkbox("Require Website", value=False)
-    min_contact_email_quality_score = st.number_input(
-        "Minimum Contact Email Quality Score",
-        min_value=0,
-        max_value=10,
-        value=0,
-    )
-    min_google_reviews = st.number_input(
-        "Minimum Google Reviews (if available)",
-        min_value=0,
-        max_value=100000,
-        value=0,
-        step=1,
-    )
     export_mode = st.selectbox(
         "Export Mode", ["Outreach Ready", "Lead List Only", "CRM Upload"]
     )
@@ -3090,15 +2557,15 @@ if run_clicked:
             cities=cities,
             max_results=int(max_results),
             outreach_limit=int(outreach_limit),
-            min_score=int(min_score),
-            max_score=int(max_score),
+            min_score=1,
+            max_score=10,
             min_opportunity_score=int(min_opportunity_score),
             high_opportunity_only=bool(high_opportunity_only),
             require_missing_booking=bool(require_missing_booking),
             require_missing_live_chat=bool(require_missing_live_chat),
             require_website=bool(require_website),
-            min_contact_email_quality_score=int(min_contact_email_quality_score),
-            min_google_reviews=int(min_google_reviews),
+            min_contact_email_quality_score=0,
+            min_google_reviews=0,
             progress_bar=progress_bar,
             status_text=status_text,
         )
