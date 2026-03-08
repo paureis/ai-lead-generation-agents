@@ -754,7 +754,12 @@ def _build_audit_outreach_content(lead: dict) -> dict[str, str]:
     city = str(lead.get("search_city") or "your area").strip()
     main_opportunity = _derive_main_opportunity(lead)
 
-    subject = f"Quick website growth report for {business_name}"
+    subject_options = [
+        f"Quick question about {business_name}'s website",
+        f"Noticed something on {business_name}'s website",
+    ]
+    subject_index = sum(ord(ch) for ch in business_name.lower()) % len(subject_options)
+    subject = subject_options[subject_index]
     cta = "Would you be open to a quick 10-minute call to walk through it?"
     email = (
         f"I was reviewing {niche} websites in {city} and ran a quick automated analysis of your site.\n\n"
