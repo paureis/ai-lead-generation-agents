@@ -1,5 +1,6 @@
 import sys
 import time
+import ast
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -251,6 +252,10 @@ def _lead_identity(lead: dict) -> str:
     return f"name_addr_city:{name}|{address}|{city}"
 
 
+def _normalize_outreach_approval_key(raw_key: Any) -> str:
+    return "|".join(part.strip() for part in str(raw_key or "").split("|"))
+
+
 def _outreach_approval_key(lead: dict) -> str:
     name = str(lead.get("name") or "")
     website = str(lead.get("website") or "")
@@ -258,7 +263,7 @@ def _outreach_approval_key(lead: dict) -> str:
     best_contact_email = str(lead.get("best_contact_email") or "").strip()
     fallback_email = str(lead.get("email") or "").strip()
     contact_email = best_contact_email if best_contact_email else fallback_email
-    return f"{name}|{website}|{city}|{contact_email}"
+    return _normalize_outreach_approval_key(f"{name}|{website}|{city}|{contact_email}")
 
 
 def _to_bool(value: Any) -> bool:
@@ -278,6 +283,28 @@ def _to_text(value: Any) -> str:
     return str(value)
 
 
+def _effective_lifecycle_timestamp(
+    meeting_booked_at: Any,
+    replied_at: Any,
+    sent_at: Any,
+    queued_to_send_at: Any,
+    approved_at: Any,
+    last_reviewed_at: Any,
+):
+    for raw_value in (
+        meeting_booked_at,
+        replied_at,
+        sent_at,
+        queued_to_send_at,
+        approved_at,
+        last_reviewed_at,
+    ):
+        parsed = pd.to_datetime(_to_text(raw_value), errors="coerce")
+        if pd.notna(parsed):
+            return parsed
+    return pd.NaT
+
+
 def load_outreach_approval_state() -> dict[str, dict[str, Any]]:
     if not OUTREACH_APPROVAL_STATE_PATH.exists():
         return {}
@@ -290,17 +317,117 @@ def load_outreach_approval_state() -> dict[str, dict[str, Any]]:
     if df.empty:
         return {}
 
+    working_df = df.copy()
+    required_columns = [
+        "lead_key",
+        "name",
+        "website",
+        "search_city",
+        "best_contact_email",
+        "website_opportunity_score",
+        "website_opportunity_label",
+        "email",
+        "reply_status",
+        "replied_at",
+        "interest_status",
+        "meeting_booked_at",
+        "sent_at",
+        "queued_to_send_at",
+        "approved_at",
+        "last_reviewed_at",
+    ]
+    for col in required_columns:
+        if col not in working_df.columns:
+            working_df[col] = ""
+
+    working_df["lead_key"] = working_df["lead_key"].apply(_to_text).str.strip()
+    missing_key_mask = working_df["lead_key"] == ""
+    if missing_key_mask.any():
+        best_email_series = (
+            working_df.loc[missing_key_mask, "best_contact_email"].apply(_to_text).str.strip()
+        )
+        fallback_email_series = (
+            working_df.loc[missing_key_mask, "email"].apply(_to_text).str.strip()
+        )
+        contact_email_series = best_email_series.where(best_email_series != "", fallback_email_series)
+        working_df.loc[missing_key_mask, "lead_key"] = (
+            working_df.loc[missing_key_mask, "name"].apply(_to_text).str.strip()
+            + "|"
+            + working_df.loc[missing_key_mask, "website"].apply(_to_text).str.strip()
+            + "|"
+            + working_df.loc[missing_key_mask, "search_city"].apply(_to_text).str.strip()
+            + "|"
+            + contact_email_series
+        )
+
+    all_best_email_series = working_df["best_contact_email"].apply(_to_text).str.strip()
+    all_fallback_email_series = working_df["email"].apply(_to_text).str.strip()
+    all_contact_email_series = all_best_email_series.where(
+        all_best_email_series != "", all_fallback_email_series
+    )
+    canonical_key_series = (
+        working_df["name"].apply(_to_text).str.strip()
+        + "|"
+        + working_df["website"].apply(_to_text).str.strip()
+        + "|"
+        + working_df["search_city"].apply(_to_text).str.strip()
+        + "|"
+        + all_contact_email_series
+    ).map(_normalize_outreach_approval_key)
+    canonical_key_non_empty_mask = (
+        canonical_key_series.str.replace("|", "", regex=False).str.strip() != ""
+    )
+    working_df.loc[canonical_key_non_empty_mask, "lead_key"] = canonical_key_series[
+        canonical_key_non_empty_mask
+    ]
+    working_df["lead_key"] = working_df["lead_key"].map(_normalize_outreach_approval_key)
+    working_df = working_df[working_df["lead_key"].str.strip() != ""].copy()
+    if working_df.empty:
+        return {}
+
+    for status_col in ("workflow_status", "send_status", "reply_status", "interest_status"):
+        if status_col not in working_df.columns:
+            working_df[status_col] = ""
+
+    working_df["_meeting_booked_at_dt"] = pd.to_datetime(
+        working_df["meeting_booked_at"], errors="coerce"
+    )
+    working_df["_replied_at_dt"] = pd.to_datetime(working_df["replied_at"], errors="coerce")
+    working_df["_sent_at_dt"] = pd.to_datetime(working_df["sent_at"], errors="coerce")
+    working_df["_queued_to_send_at_dt"] = pd.to_datetime(
+        working_df["queued_to_send_at"], errors="coerce"
+    )
+    working_df["_approved_at_dt"] = pd.to_datetime(working_df["approved_at"], errors="coerce")
+    working_df["_last_reviewed_at_dt"] = pd.to_datetime(
+        working_df["last_reviewed_at"], errors="coerce"
+    )
+    working_df["_effective_latest_ts"] = working_df["_meeting_booked_at_dt"]
+    working_df["_effective_latest_ts"] = working_df["_effective_latest_ts"].fillna(
+        working_df["_replied_at_dt"]
+    )
+    working_df["_effective_latest_ts"] = working_df["_effective_latest_ts"].fillna(
+        working_df["_sent_at_dt"]
+    )
+    working_df["_effective_latest_ts"] = working_df["_effective_latest_ts"].fillna(
+        working_df["_queued_to_send_at_dt"]
+    )
+    working_df["_effective_latest_ts"] = working_df["_effective_latest_ts"].fillna(
+        working_df["_approved_at_dt"]
+    )
+    working_df["_effective_latest_ts"] = working_df["_effective_latest_ts"].fillna(
+        working_df["_last_reviewed_at_dt"]
+    )
+    working_df["_row_order"] = range(len(working_df))
+    working_df = working_df.sort_values(
+        by=["_effective_latest_ts", "_row_order"],
+        ascending=[False, False],
+        na_position="last",
+    )
+    working_df = working_df.drop_duplicates(subset=["lead_key"], keep="first")
+
     loaded_state: dict[str, dict[str, Any]] = {}
-    for _, row in df.iterrows():
-        lead_key = _to_text(row.get("lead_key")).strip()
-        if not lead_key:
-            name = _to_text(row.get("name"))
-            website = _to_text(row.get("website"))
-            city = _to_text(row.get("search_city"))
-            best_contact_email = _to_text(row.get("best_contact_email"))
-            lead_key = f"{name}|{website}|{city}|{best_contact_email}"
-        if not lead_key:
-            continue
+    for _, row in working_df.iterrows():
+        lead_key = _normalize_outreach_approval_key(_to_text(row.get("lead_key")).strip())
 
         approved_to_send = _to_bool(row.get("approved_to_send"))
         skip_this_lead = _to_bool(row.get("skip_this_lead"))
@@ -312,6 +439,8 @@ def load_outreach_approval_state() -> dict[str, dict[str, Any]]:
             "website": _to_text(row.get("website")),
             "search_city": _to_text(row.get("search_city")),
             "best_contact_email": _to_text(row.get("best_contact_email")),
+            "website_opportunity_score": _to_text(row.get("website_opportunity_score")),
+            "website_opportunity_label": _to_text(row.get("website_opportunity_label")),
             "approved_to_send": approved_to_send,
             "skip_this_lead": skip_this_lead,
             "edited_subject": _to_text(row.get("edited_subject")),
@@ -321,17 +450,65 @@ def load_outreach_approval_state() -> dict[str, dict[str, Any]]:
             "workflow_status": _to_text(row.get("workflow_status")),
             "approved_at": _to_text(row.get("approved_at")),
             "queued_to_send_at": _to_text(row.get("queued_to_send_at")),
+            "send_status": _to_text(row.get("send_status")),
+            "sent_at": _to_text(row.get("sent_at")),
+            "reply_status": _to_text(row.get("reply_status")),
+            "replied_at": _to_text(row.get("replied_at")),
+            "interest_status": _to_text(row.get("interest_status")),
+            "meeting_booked_at": _to_text(row.get("meeting_booked_at")),
             "last_reviewed_at": _to_text(row.get("last_reviewed_at")),
         }
 
         current = loaded_state[lead_key]
-        if current["workflow_status"] not in {"pending", "approved", "skipped", "queued_to_send"}:
+        current["website_opportunity_score"] = int(
+            pd.to_numeric(current.get("website_opportunity_score"), errors="coerce")
+            if pd.notna(pd.to_numeric(current.get("website_opportunity_score"), errors="coerce"))
+            else 0
+        )
+        current["website_opportunity_label"] = str(
+            current.get("website_opportunity_label") or "low_opportunity"
+        ).strip().lower()
+        if current["website_opportunity_label"] not in {
+            "high_opportunity",
+            "medium_opportunity",
+            "low_opportunity",
+        }:
+            current["website_opportunity_label"] = "low_opportunity"
+        if current["workflow_status"] not in {"pending", "approved", "skipped", "queued_to_send", "sent"}:
             if approved_to_send:
                 current["workflow_status"] = "approved"
             elif skip_this_lead:
                 current["workflow_status"] = "skipped"
             else:
                 current["workflow_status"] = "pending"
+        if current["send_status"] not in {"not_sent", "sent"}:
+            current["send_status"] = "sent" if current["workflow_status"] == "sent" else "not_sent"
+        if current["send_status"] != "sent":
+            current["sent_at"] = ""
+        if current["workflow_status"] != "sent":
+            current["reply_status"] = "no_reply"
+            current["replied_at"] = ""
+            current["interest_status"] = "unknown"
+            current["meeting_booked_at"] = ""
+        else:
+            current["reply_status"] = str(current.get("reply_status") or "").strip().lower()
+            if current["reply_status"] not in {"no_reply", "replied"}:
+                current["reply_status"] = "no_reply"
+            current["interest_status"] = str(current.get("interest_status") or "").strip().lower()
+            if current["interest_status"] not in {
+                "unknown",
+                "interested",
+                "not_interested",
+                "meeting_booked",
+            }:
+                current["interest_status"] = "unknown"
+            if current["interest_status"] in {"interested", "not_interested", "meeting_booked"}:
+                current["reply_status"] = "replied"
+            if current["reply_status"] != "replied":
+                current["replied_at"] = ""
+                current["interest_status"] = "unknown"
+            if current["interest_status"] != "meeting_booked":
+                current["meeting_booked_at"] = ""
 
     return loaded_state
 
@@ -345,6 +522,8 @@ def save_outreach_approval_state(approval_state: dict[str, dict[str, Any]]) -> N
         "website",
         "search_city",
         "best_contact_email",
+        "website_opportunity_score",
+        "website_opportunity_label",
         "approved_to_send",
         "skip_this_lead",
         "edited_subject",
@@ -354,10 +533,60 @@ def save_outreach_approval_state(approval_state: dict[str, dict[str, Any]]) -> N
         "workflow_status",
         "approved_at",
         "queued_to_send_at",
+        "send_status",
+        "sent_at",
+        "reply_status",
+        "replied_at",
+        "interest_status",
+        "meeting_booked_at",
         "last_reviewed_at",
     ]
+    normalized_state: dict[str, dict[str, Any]] = {}
+    for raw_lead_key, state in approval_state.items():
+        lead_key = _normalize_outreach_approval_key(raw_lead_key)
+        candidate_state = dict(state or {})
+        canonical_contact_email = str(candidate_state.get("best_contact_email") or "").strip()
+        if not canonical_contact_email:
+            canonical_contact_email = str(candidate_state.get("email") or "").strip()
+        canonical_key = _normalize_outreach_approval_key(
+            f"{str(candidate_state.get('name') or '').strip()}|"
+            f"{str(candidate_state.get('website') or '').strip()}|"
+            f"{str(candidate_state.get('search_city') or '').strip()}|"
+            f"{canonical_contact_email}"
+        )
+        if canonical_key.replace("|", "").strip():
+            lead_key = canonical_key
+
+        if not lead_key:
+            continue
+        existing_state = normalized_state.get(lead_key)
+        if existing_state is None:
+            normalized_state[lead_key] = candidate_state
+            continue
+
+        existing_ts = _effective_lifecycle_timestamp(
+            existing_state.get("meeting_booked_at"),
+            existing_state.get("replied_at"),
+            existing_state.get("sent_at"),
+            existing_state.get("queued_to_send_at"),
+            existing_state.get("approved_at"),
+            existing_state.get("last_reviewed_at"),
+        )
+        candidate_ts = _effective_lifecycle_timestamp(
+            candidate_state.get("meeting_booked_at"),
+            candidate_state.get("replied_at"),
+            candidate_state.get("sent_at"),
+            candidate_state.get("queued_to_send_at"),
+            candidate_state.get("approved_at"),
+            candidate_state.get("last_reviewed_at"),
+        )
+        existing_rank = int(existing_ts.value) if pd.notna(existing_ts) else -1
+        candidate_rank = int(candidate_ts.value) if pd.notna(candidate_ts) else -1
+        if candidate_rank >= existing_rank:
+            normalized_state[lead_key] = candidate_state
+
     rows = []
-    for lead_key, state in approval_state.items():
+    for lead_key, state in normalized_state.items():
         approved_to_send = bool(state.get("approved_to_send", False))
         skip_this_lead = bool(state.get("skip_this_lead", False))
         if approved_to_send:
@@ -374,10 +603,44 @@ def save_outreach_approval_state(approval_state: dict[str, dict[str, Any]]) -> N
         if skip_this_lead:
             workflow_status = "skipped"
         elif approved_to_send:
-            if workflow_status not in {"approved", "queued_to_send"}:
+            if workflow_status not in {"approved", "queued_to_send", "sent"}:
                 workflow_status = "approved"
         else:
             workflow_status = "pending"
+
+        send_status = str(state.get("send_status") or "").strip().lower()
+        sent_at = str(state.get("sent_at") or "")
+        if workflow_status == "sent":
+            send_status = "sent"
+            if not sent_at:
+                sent_at = datetime.now().isoformat()
+        else:
+            send_status = "not_sent"
+            sent_at = ""
+
+        reply_status = str(state.get("reply_status") or "").strip().lower()
+        replied_at = str(state.get("replied_at") or "")
+        interest_status = str(state.get("interest_status") or "").strip().lower()
+        meeting_booked_at = str(state.get("meeting_booked_at") or "")
+        if workflow_status != "sent":
+            reply_status = "no_reply"
+            replied_at = ""
+            interest_status = "unknown"
+            meeting_booked_at = ""
+        else:
+            if reply_status not in {"no_reply", "replied"}:
+                reply_status = "no_reply"
+            if interest_status not in {"unknown", "interested", "not_interested", "meeting_booked"}:
+                interest_status = "unknown"
+            if interest_status in {"interested", "not_interested", "meeting_booked"}:
+                reply_status = "replied"
+            if reply_status != "replied":
+                replied_at = ""
+                interest_status = "unknown"
+            if interest_status == "meeting_booked" and not meeting_booked_at:
+                meeting_booked_at = datetime.now().isoformat()
+            elif interest_status != "meeting_booked":
+                meeting_booked_at = ""
 
         rows.append(
             {
@@ -386,6 +649,12 @@ def save_outreach_approval_state(approval_state: dict[str, dict[str, Any]]) -> N
                 "website": str(state.get("website") or ""),
                 "search_city": str(state.get("search_city") or ""),
                 "best_contact_email": str(state.get("best_contact_email") or ""),
+                "website_opportunity_score": int(
+                    pd.to_numeric(state.get("website_opportunity_score"), errors="coerce")
+                    if pd.notna(pd.to_numeric(state.get("website_opportunity_score"), errors="coerce"))
+                    else 0
+                ),
+                "website_opportunity_label": str(state.get("website_opportunity_label") or "low_opportunity"),
                 "approved_to_send": approved_to_send,
                 "skip_this_lead": skip_this_lead,
                 "edited_subject": str(state.get("edited_subject") or ""),
@@ -395,6 +664,12 @@ def save_outreach_approval_state(approval_state: dict[str, dict[str, Any]]) -> N
                 "workflow_status": workflow_status,
                 "approved_at": str(state.get("approved_at") or ""),
                 "queued_to_send_at": str(state.get("queued_to_send_at") or ""),
+                "send_status": send_status,
+                "sent_at": sent_at,
+                "reply_status": reply_status,
+                "replied_at": replied_at,
+                "interest_status": interest_status,
+                "meeting_booked_at": meeting_booked_at,
                 "last_reviewed_at": str(state.get("last_reviewed_at") or ""),
             }
         )
@@ -426,14 +701,152 @@ def _dedupe_discovered_leads(raw_leads_all: list[dict]) -> list[dict]:
     return deduped
 
 
-def _build_filtered_views(ready_leads: list[dict], min_score: int):
+def _parse_missing_features(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return [str(item).strip().lower() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        if raw.startswith("[") and raw.endswith("]"):
+            try:
+                parsed = ast.literal_eval(raw)
+                if isinstance(parsed, list):
+                    return [str(item).strip().lower() for item in parsed if str(item).strip()]
+            except Exception:
+                pass
+        return [part.strip().lower() for part in raw.split(",") if part.strip()]
+    return [str(value).strip().lower()]
+
+
+def _has_missing_feature(value: Any, aliases: set[str]) -> bool:
+    normalized = set(_parse_missing_features(value))
+    return any(alias in normalized for alias in aliases)
+
+
+def _derive_main_opportunity(lead: dict) -> str:
+    missing_features = set(_parse_missing_features(lead.get("missing_features")))
+    if missing_features.intersection({"booking", "has_booking", "online_booking", "booking_system"}):
+        return "online booking"
+    if missing_features.intersection({"live_chat", "chat_widget", "has_chat_widget"}):
+        return "live chat"
+    if missing_features.intersection({"contact_form", "has_contact_form"}):
+        return "a contact form"
+
+    if _to_bool(lead.get("has_booking")) is False:
+        return "online booking"
+    if _to_bool(lead.get("has_chat_widget")) is False:
+        return "live chat"
+    if _to_bool(lead.get("has_contact_form")) is False:
+        return "a contact form"
+
+    opportunity = str(lead.get("opportunity") or "").strip().rstrip(".")
+    if opportunity:
+        return opportunity
+    return "a clear conversion path"
+
+
+def _build_audit_outreach_content(lead: dict) -> dict[str, str]:
+    business_name = str(lead.get("name") or "your business").strip()
+    niche = str(lead.get("search_niche") or "local").strip()
+    city = str(lead.get("search_city") or "your area").strip()
+    main_opportunity = _derive_main_opportunity(lead)
+
+    subject = f"Quick website growth report for {business_name}"
+    cta = "Would you be open to a quick 10-minute call to walk through it?"
+    email = (
+        f"I was reviewing {niche} websites in {city} and ran a quick automated analysis of your site.\n\n"
+        f"One thing that stood out: your site currently doesn't have {main_opportunity}.\n\n"
+        "I generated a short 1-page website growth report showing a few quick improvements that could increase bookings.\n\n"
+        f"{cta}"
+    )
+    return {"subject": subject, "email": email, "cta": cta}
+
+
+def _is_explicit_false(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value is False
+    return str(value or "").strip().lower() in {"0", "false", "no", "n"}
+
+
+def _compute_website_opportunity(lead: dict) -> dict[str, Any]:
+    score = 0
+    missing_features = set(_parse_missing_features(lead.get("missing_features")))
+
+    if _is_explicit_false(lead.get("has_booking")) or missing_features.intersection(
+        {"booking", "has_booking", "online_booking", "booking_system"}
+    ):
+        score += 35
+
+    if _is_explicit_false(lead.get("has_contact_form")) or missing_features.intersection(
+        {"contact_form", "has_contact_form"}
+    ):
+        score += 20
+
+    if _is_explicit_false(lead.get("has_chat_widget")) or missing_features.intersection(
+        {"live_chat", "chat_widget", "has_chat_widget"}
+    ):
+        score += 15
+
+    seo_summary = str(lead.get("seo_summary") or "").strip().lower()
+    seo_issue_keywords = {"missing", "issue", "lacking", "needs improvement", "no ", "not "}
+    if _is_explicit_false(lead.get("has_meta_description")) or (
+        seo_summary
+        and seo_summary not in {"not available", "n/a", "na"}
+        and any(keyword in seo_summary for keyword in seo_issue_keywords)
+    ):
+        score += 10
+
+    tech_stack = str(lead.get("tech_stack") or "").strip().lower()
+    if tech_stack in {"", "unknown", "not detected", "none", "n/a", "na"}:
+        score += 5
+
+    score = max(0, min(100, int(score)))
+    if score >= 80:
+        label = "high_opportunity"
+    elif score >= 50:
+        label = "medium_opportunity"
+    else:
+        label = "low_opportunity"
+
+    return {
+        "website_opportunity_score": score,
+        "website_opportunity_label": label,
+    }
+
+
+def _apply_website_opportunity_scores(leads: list[dict]) -> list[dict]:
+    scored_leads = []
+    for lead in leads:
+        row = dict(lead)
+        row.update(_compute_website_opportunity(row))
+        scored_leads.append(row)
+    return scored_leads
+
+
+def _build_filtered_views(
+    ready_leads: list[dict],
+    min_score: int,
+    max_score: int = 10,
+    require_missing_booking: bool = False,
+    require_missing_live_chat: bool = False,
+    require_website: bool = False,
+    min_contact_email_quality_score: int = 0,
+    min_google_reviews: int = 0,
+    min_opportunity_score: int = 0,
+    high_opportunity_only: bool = False,
+):
     df = pd.DataFrame(ready_leads)
     if df.empty:
         return df, df.copy(), df.copy()
 
     if "score" in df.columns:
         df["score_numeric"] = pd.to_numeric(df["score"], errors="coerce")
-        filtered_df = df[df["score_numeric"] >= min_score].copy()
+        filtered_df = df[
+            (df["score_numeric"] >= min_score) & (df["score_numeric"] <= max_score)
+        ].copy()
         if "lead_priority_score" in filtered_df.columns:
             filtered_df["lead_priority_score_numeric"] = pd.to_numeric(
                 filtered_df["lead_priority_score"], errors="coerce"
@@ -449,6 +862,84 @@ def _build_filtered_views(ready_leads: list[dict], min_score: int):
             filtered_df = filtered_df.sort_values(by="score_numeric", ascending=False)
     else:
         filtered_df = df.copy()
+
+    if require_website and "website" in filtered_df.columns:
+        filtered_df = filtered_df[
+            filtered_df["website"].fillna("").astype(str).str.strip() != ""
+        ].copy()
+
+    if require_missing_booking:
+        has_booking_false = (
+            ~filtered_df["has_booking"].apply(_to_bool)
+            if "has_booking" in filtered_df.columns
+            else pd.Series(False, index=filtered_df.index)
+        )
+        missing_booking_feature = (
+            filtered_df["missing_features"].apply(
+                lambda value: _has_missing_feature(
+                    value, {"booking", "has_booking", "online_booking", "booking_system"}
+                )
+            )
+            if "missing_features" in filtered_df.columns
+            else pd.Series(False, index=filtered_df.index)
+        )
+        filtered_df = filtered_df[has_booking_false | missing_booking_feature].copy()
+
+    if require_missing_live_chat:
+        has_chat_false = (
+            ~filtered_df["has_chat_widget"].apply(_to_bool)
+            if "has_chat_widget" in filtered_df.columns
+            else pd.Series(False, index=filtered_df.index)
+        )
+        missing_chat_feature = (
+            filtered_df["missing_features"].apply(
+                lambda value: _has_missing_feature(value, {"live_chat", "chat_widget", "has_chat_widget"})
+            )
+            if "missing_features" in filtered_df.columns
+            else pd.Series(False, index=filtered_df.index)
+        )
+        filtered_df = filtered_df[has_chat_false | missing_chat_feature].copy()
+
+    if min_contact_email_quality_score > 0:
+        if "contact_email_score" in filtered_df.columns:
+            filtered_df["contact_email_score_numeric"] = pd.to_numeric(
+                filtered_df["contact_email_score"], errors="coerce"
+            ).fillna(0)
+            filtered_df = filtered_df[
+                filtered_df["contact_email_score_numeric"] >= float(min_contact_email_quality_score)
+            ].copy()
+
+    if min_google_reviews > 0 and "reviews" in filtered_df.columns:
+        filtered_df["reviews_numeric"] = pd.to_numeric(filtered_df["reviews"], errors="coerce").fillna(0)
+        filtered_df = filtered_df[
+            filtered_df["reviews_numeric"] >= float(min_google_reviews)
+        ].copy()
+
+    if "website_opportunity_score" not in filtered_df.columns:
+        filtered_df["website_opportunity_score"] = filtered_df.apply(
+            lambda row: _compute_website_opportunity(row.to_dict()).get("website_opportunity_score", 0),
+            axis=1,
+        )
+    if "website_opportunity_label" not in filtered_df.columns:
+        filtered_df["website_opportunity_label"] = filtered_df.apply(
+            lambda row: _compute_website_opportunity(row.to_dict()).get(
+                "website_opportunity_label", "low_opportunity"
+            ),
+            axis=1,
+        )
+
+    filtered_df["website_opportunity_score_numeric"] = pd.to_numeric(
+        filtered_df["website_opportunity_score"], errors="coerce"
+    ).fillna(0)
+    if min_opportunity_score > 0:
+        filtered_df = filtered_df[
+            filtered_df["website_opportunity_score_numeric"] >= float(min_opportunity_score)
+        ].copy()
+    if high_opportunity_only:
+        filtered_df = filtered_df[
+            filtered_df["website_opportunity_label"].fillna("").astype(str).str.strip().str.lower()
+            == "high_opportunity"
+        ].copy()
 
     if "email" not in filtered_df.columns:
         filtered_df["email"] = ""
@@ -469,6 +960,14 @@ def execute_full_pipeline(
     max_results: int,
     outreach_limit: int,
     min_score: int,
+    max_score: int,
+    min_opportunity_score: int,
+    high_opportunity_only: bool,
+    require_missing_booking: bool,
+    require_missing_live_chat: bool,
+    require_website: bool,
+    min_contact_email_quality_score: int,
+    min_google_reviews: int,
     progress_bar,
     status_text,
 ):
@@ -553,7 +1052,9 @@ def execute_full_pipeline(
     for lead in scored_leads:
         key = _lead_identity(lead)
         if key in outreach_by_key:
-            merged_leads.append(outreach_by_key[key])
+            templated = dict(outreach_by_key[key])
+            templated.update(_build_audit_outreach_content(templated))
+            merged_leads.append(templated)
         else:
             base = dict(lead)
             base.update(
@@ -575,6 +1076,7 @@ def execute_full_pipeline(
     status_text.info("Step 5/5: Running contactability review...")
     t0 = time.perf_counter()
     ready_leads = evaluate_contactability_batch(merged_leads)
+    ready_leads = _apply_website_opportunity_scores(ready_leads)
     pd.DataFrame(ready_leads).to_csv(ready_path, index=False)
     timings["Contactability Review"] = time.perf_counter() - t0
     progress_bar.progress(100)
@@ -587,6 +1089,14 @@ def execute_full_pipeline(
     filtered_df, outreach_df, other_scored_df = _build_filtered_views(
         ready_leads=ready_leads,
         min_score=int(min_score),
+        max_score=int(max_score),
+        min_opportunity_score=int(min_opportunity_score),
+        high_opportunity_only=bool(high_opportunity_only),
+        require_missing_booking=bool(require_missing_booking),
+        require_missing_live_chat=bool(require_missing_live_chat),
+        require_website=bool(require_website),
+        min_contact_email_quality_score=int(min_contact_email_quality_score),
+        min_google_reviews=int(min_google_reviews),
     )
     map_df = filtered_df.copy()
 
@@ -621,6 +1131,14 @@ def execute_full_pipeline(
             "max_results": int(max_results),
             "outreach_limit": int(outreach_limit),
             "min_score": int(min_score),
+            "max_score": int(max_score),
+            "min_opportunity_score": int(min_opportunity_score),
+            "high_opportunity_only": bool(high_opportunity_only),
+            "require_missing_booking": bool(require_missing_booking),
+            "require_missing_live_chat": bool(require_missing_live_chat),
+            "require_website": bool(require_website),
+            "min_contact_email_quality_score": int(min_contact_email_quality_score),
+            "min_google_reviews": int(min_google_reviews),
         },
     }
 
@@ -1028,6 +1546,14 @@ def render_full_results(results, export_mode: str):
         lead_website = str(lead.get("website", "") or "")
         lead_city = str(lead.get("search_city", "") or "")
         lead_best_contact_email = str(lead.get("best_contact_email", "") or "")
+        lead_website_opportunity_score = int(
+            pd.to_numeric(lead.get("website_opportunity_score"), errors="coerce")
+            if pd.notna(pd.to_numeric(lead.get("website_opportunity_score"), errors="coerce"))
+            else 0
+        )
+        lead_website_opportunity_label = str(
+            lead.get("website_opportunity_label", "low_opportunity") or "low_opportunity"
+        )
 
         if lead_state_key not in approval_state:
             approval_state[lead_state_key] = {
@@ -1040,10 +1566,18 @@ def render_full_results(results, export_mode: str):
                 "website": lead_website,
                 "search_city": lead_city,
                 "best_contact_email": lead_best_contact_email,
+                "website_opportunity_score": lead_website_opportunity_score,
+                "website_opportunity_label": lead_website_opportunity_label,
                 "review_status": "pending",
                 "workflow_status": "pending",
                 "approved_at": "",
                 "queued_to_send_at": "",
+                "send_status": "not_sent",
+                "sent_at": "",
+                "reply_status": "no_reply",
+                "replied_at": "",
+                "interest_status": "unknown",
+                "meeting_booked_at": "",
                 "last_reviewed_at": "",
             }
             approval_state_changed = True
@@ -1058,10 +1592,22 @@ def render_full_results(results, export_mode: str):
             approval_state[lead_state_key].setdefault("website", lead_website)
             approval_state[lead_state_key].setdefault("search_city", lead_city)
             approval_state[lead_state_key].setdefault("best_contact_email", lead_best_contact_email)
+            approval_state[lead_state_key].setdefault(
+                "website_opportunity_score", lead_website_opportunity_score
+            )
+            approval_state[lead_state_key].setdefault(
+                "website_opportunity_label", lead_website_opportunity_label
+            )
             approval_state[lead_state_key].setdefault("review_status", "pending")
             approval_state[lead_state_key].setdefault("workflow_status", "pending")
             approval_state[lead_state_key].setdefault("approved_at", "")
             approval_state[lead_state_key].setdefault("queued_to_send_at", "")
+            approval_state[lead_state_key].setdefault("send_status", "not_sent")
+            approval_state[lead_state_key].setdefault("sent_at", "")
+            approval_state[lead_state_key].setdefault("reply_status", "no_reply")
+            approval_state[lead_state_key].setdefault("replied_at", "")
+            approval_state[lead_state_key].setdefault("interest_status", "unknown")
+            approval_state[lead_state_key].setdefault("meeting_booked_at", "")
             approval_state[lead_state_key].setdefault("last_reviewed_at", "")
             if previous_defaults_state != approval_state[lead_state_key]:
                 approval_state_changed = True
@@ -1090,13 +1636,40 @@ def render_full_results(results, export_mode: str):
             skip_this_lead = False
 
         workflow_status = str(base_state.get("workflow_status") or "").strip().lower()
-        if workflow_status not in {"pending", "approved", "skipped", "queued_to_send"}:
+        if workflow_status not in {"pending", "approved", "skipped", "queued_to_send", "sent"}:
             if approved_to_send:
                 workflow_status = "approved"
             elif skip_this_lead:
                 workflow_status = "skipped"
             else:
                 workflow_status = "pending"
+        send_status = str(base_state.get("send_status") or "").strip().lower()
+        if send_status not in {"not_sent", "sent"}:
+            send_status = "sent" if workflow_status == "sent" else "not_sent"
+        sent_at = str(base_state.get("sent_at", "") or "")
+        if send_status != "sent":
+            sent_at = ""
+        reply_status = str(base_state.get("reply_status", "no_reply") or "no_reply").strip().lower()
+        replied_at = str(base_state.get("replied_at", "") or "")
+        interest_status = str(base_state.get("interest_status", "unknown") or "unknown").strip().lower()
+        meeting_booked_at = str(base_state.get("meeting_booked_at", "") or "")
+        if workflow_status != "sent":
+            reply_status = "no_reply"
+            replied_at = ""
+            interest_status = "unknown"
+            meeting_booked_at = ""
+        else:
+            if reply_status not in {"no_reply", "replied"}:
+                reply_status = "no_reply"
+            if interest_status not in {"unknown", "interested", "not_interested", "meeting_booked"}:
+                interest_status = "unknown"
+            if interest_status in {"interested", "not_interested", "meeting_booked"}:
+                reply_status = "replied"
+            if reply_status != "replied":
+                replied_at = ""
+                interest_status = "unknown"
+            if interest_status != "meeting_booked":
+                meeting_booked_at = ""
 
         visible_queue_state[lead_state_key] = {
             "approved_to_send": approved_to_send,
@@ -1104,6 +1677,21 @@ def render_full_results(results, export_mode: str):
             "workflow_status": workflow_status,
             "approved_at": str(base_state.get("approved_at", "") or ""),
             "queued_to_send_at": str(base_state.get("queued_to_send_at", "") or ""),
+            "send_status": send_status,
+            "sent_at": sent_at,
+            "reply_status": reply_status,
+            "replied_at": replied_at,
+            "interest_status": interest_status,
+            "meeting_booked_at": meeting_booked_at,
+            "website_opportunity_score": int(
+                pd.to_numeric(base_state.get("website_opportunity_score"), errors="coerce")
+                if pd.notna(pd.to_numeric(base_state.get("website_opportunity_score"), errors="coerce"))
+                else 0
+            ),
+            "website_opportunity_label": str(
+                base_state.get("website_opportunity_label", "low_opportunity")
+                or "low_opportunity"
+            ),
             "edited_subject": str(
                 st.session_state.get(subject_key, base_state.get("edited_subject", "")) or ""
             ),
@@ -1144,6 +1732,8 @@ def render_full_results(results, export_mode: str):
             current_visible_state = visible_queue_state.get(lead_state_key, {})
             if not current_visible_state.get("approved_to_send", False):
                 continue
+            if str(current_visible_state.get("workflow_status", "")).strip().lower() == "sent":
+                continue
 
             previous_state = dict(lead_state)
             lead_state["workflow_status"] = "queued_to_send"
@@ -1167,6 +1757,48 @@ def render_full_results(results, export_mode: str):
             st.success(f"Queued {queued_count} visible approved lead(s) for future sending.")
         else:
             st.info("No visible approved leads to queue.")
+
+    if st.button(
+        "Simulate Send for Visible Queued Leads",
+        use_container_width=True,
+        key="simulate_send_visible_queued_leads",
+        disabled=visible_queue_df.empty,
+    ):
+        sent_now = datetime.now().isoformat()
+        sent_count = 0
+        for lead in visible_queue_df.to_dict(orient="records"):
+            lead_state_key = _outreach_approval_key(lead)
+            lead_state = approval_state.get(lead_state_key, {})
+            current_visible_state = visible_queue_state.get(lead_state_key, {})
+            if str(current_visible_state.get("workflow_status", "")).strip().lower() != "queued_to_send":
+                continue
+
+            previous_state = dict(lead_state)
+            lead_state["workflow_status"] = "sent"
+            lead_state["send_status"] = "sent"
+            lead_state["sent_at"] = sent_now
+            lead_state["reply_status"] = "no_reply"
+            lead_state["replied_at"] = ""
+            lead_state["interest_status"] = "unknown"
+            lead_state["meeting_booked_at"] = ""
+
+            approval_state[lead_state_key] = lead_state
+            current_visible_state["workflow_status"] = "sent"
+            current_visible_state["send_status"] = "sent"
+            current_visible_state["sent_at"] = sent_now
+            current_visible_state["reply_status"] = "no_reply"
+            current_visible_state["replied_at"] = ""
+            current_visible_state["interest_status"] = "unknown"
+            current_visible_state["meeting_booked_at"] = ""
+            visible_queue_state[lead_state_key] = current_visible_state
+            if previous_state != lead_state:
+                approval_state_changed = True
+            sent_count += 1
+
+        if sent_count > 0:
+            st.success(f"Simulated send for {sent_count} visible queued lead(s).")
+        else:
+            st.info("No visible queued leads to simulate send.")
 
     approved_export_rows = []
     for lead in visible_queue_df.to_dict(orient="records"):
@@ -1217,6 +1849,424 @@ def render_full_results(results, export_mode: str):
         key="download_approved_outreach_csv",
     )
 
+    lifecycle_rows = []
+    for lead_key, base_state in approval_state.items():
+        normalized_lead_key = _normalize_outreach_approval_key(lead_key)
+        if not normalized_lead_key:
+            continue
+        state_snapshot = dict(base_state)
+        if lead_key in visible_queue_state:
+            state_snapshot.update(visible_queue_state[lead_key])
+        elif normalized_lead_key in visible_queue_state:
+            state_snapshot.update(visible_queue_state[normalized_lead_key])
+
+        approved_to_send = bool(state_snapshot.get("approved_to_send", False))
+        skip_this_lead = bool(state_snapshot.get("skip_this_lead", False))
+        if approved_to_send:
+            skip_this_lead = False
+
+        workflow_status = str(state_snapshot.get("workflow_status", "") or "").strip().lower()
+        if workflow_status not in {"pending", "approved", "skipped", "queued_to_send", "sent"}:
+            if approved_to_send:
+                workflow_status = "approved"
+            elif skip_this_lead:
+                workflow_status = "skipped"
+            else:
+                workflow_status = "pending"
+
+        send_status = str(state_snapshot.get("send_status", "") or "").strip().lower()
+        if send_status not in {"not_sent", "sent"}:
+            send_status = "sent" if workflow_status == "sent" else "not_sent"
+        if workflow_status == "sent":
+            send_status = "sent"
+        elif send_status != "sent":
+            send_status = "not_sent"
+
+        reply_status = str(state_snapshot.get("reply_status", "no_reply") or "no_reply").strip().lower()
+        interest_status = str(
+            state_snapshot.get("interest_status", "unknown") or "unknown"
+        ).strip().lower()
+        replied_at = str(state_snapshot.get("replied_at", "") or "")
+        meeting_booked_at = str(state_snapshot.get("meeting_booked_at", "") or "")
+        if workflow_status != "sent":
+            reply_status = "no_reply"
+            replied_at = ""
+            interest_status = "unknown"
+            meeting_booked_at = ""
+        else:
+            if reply_status not in {"no_reply", "replied"}:
+                reply_status = "no_reply"
+            if interest_status not in {"unknown", "interested", "not_interested", "meeting_booked"}:
+                interest_status = "unknown"
+            if interest_status in {"interested", "not_interested", "meeting_booked"}:
+                reply_status = "replied"
+            if reply_status != "replied":
+                replied_at = ""
+                interest_status = "unknown"
+            if interest_status != "meeting_booked":
+                meeting_booked_at = ""
+
+        lifecycle_rows.append(
+            {
+                "lead_key": normalized_lead_key,
+                "name": str(state_snapshot.get("name", "") or ""),
+                "search_city": str(state_snapshot.get("search_city", "") or ""),
+                "best_contact_email": str(state_snapshot.get("best_contact_email", "") or ""),
+                "website_opportunity_score": int(
+                    pd.to_numeric(state_snapshot.get("website_opportunity_score"), errors="coerce")
+                    if pd.notna(
+                        pd.to_numeric(state_snapshot.get("website_opportunity_score"), errors="coerce")
+                    )
+                    else 0
+                ),
+                "website_opportunity_label": str(
+                    state_snapshot.get("website_opportunity_label", "low_opportunity")
+                    or "low_opportunity"
+                ),
+                "workflow_status": workflow_status,
+                "send_status": send_status,
+                "reply_status": reply_status,
+                "replied_at": replied_at,
+                "interest_status": interest_status,
+                "meeting_booked_at": meeting_booked_at,
+                "approved_at": str(state_snapshot.get("approved_at", "") or ""),
+                "queued_to_send_at": str(state_snapshot.get("queued_to_send_at", "") or ""),
+                "sent_at": str(state_snapshot.get("sent_at", "") or ""),
+                "last_reviewed_at": str(state_snapshot.get("last_reviewed_at", "") or ""),
+            }
+        )
+
+    lifecycle_df_full = pd.DataFrame(lifecycle_rows)
+    if not lifecycle_df_full.empty:
+        lifecycle_df_full["_meeting_booked_at_dt"] = pd.to_datetime(
+            lifecycle_df_full["meeting_booked_at"], errors="coerce"
+        )
+        lifecycle_df_full["_replied_at_dt"] = pd.to_datetime(
+            lifecycle_df_full["replied_at"], errors="coerce"
+        )
+        lifecycle_df_full["_sent_at_dt"] = pd.to_datetime(lifecycle_df_full["sent_at"], errors="coerce")
+        lifecycle_df_full["_queued_to_send_at_dt"] = pd.to_datetime(
+            lifecycle_df_full["queued_to_send_at"], errors="coerce"
+        )
+        lifecycle_df_full["_approved_at_dt"] = pd.to_datetime(
+            lifecycle_df_full["approved_at"], errors="coerce"
+        )
+        lifecycle_df_full["_last_reviewed_at_dt"] = pd.to_datetime(
+            lifecycle_df_full["last_reviewed_at"], errors="coerce"
+        )
+        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_meeting_booked_at_dt"]
+        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
+            lifecycle_df_full["_replied_at_dt"]
+        )
+        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
+            lifecycle_df_full["_sent_at_dt"]
+        )
+        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
+            lifecycle_df_full["_queued_to_send_at_dt"]
+        )
+        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
+            lifecycle_df_full["_approved_at_dt"]
+        )
+        lifecycle_df_full["_effective_latest_ts"] = lifecycle_df_full["_effective_latest_ts"].fillna(
+            lifecycle_df_full["_last_reviewed_at_dt"]
+        )
+        lifecycle_df_full = lifecycle_df_full.sort_values(
+            by="_effective_latest_ts",
+            ascending=False,
+            na_position="last",
+        )
+        lifecycle_df_full = lifecycle_df_full.drop_duplicates(subset=["lead_key"], keep="first")
+
+    st.markdown("---")
+    st.subheader("Outreach Lifecycle Dashboard")
+
+    lifecycle_filtered_df = lifecycle_df_full.copy()
+    workflow_options = (
+        sorted(lifecycle_df_full["workflow_status"].dropna().astype(str).str.strip().unique().tolist())
+        if not lifecycle_df_full.empty
+        else []
+    )
+    send_options = (
+        sorted(lifecycle_df_full["send_status"].dropna().astype(str).str.strip().unique().tolist())
+        if not lifecycle_df_full.empty
+        else []
+    )
+    reply_options = (
+        sorted(lifecycle_df_full["reply_status"].dropna().astype(str).str.strip().unique().tolist())
+        if not lifecycle_df_full.empty
+        else []
+    )
+    interest_options = (
+        sorted(lifecycle_df_full["interest_status"].dropna().astype(str).str.strip().unique().tolist())
+        if not lifecycle_df_full.empty
+        else []
+    )
+    city_options = (
+        sorted(
+            {
+                str(value).strip()
+                for value in lifecycle_df_full["search_city"].dropna().tolist()
+                if str(value).strip()
+            }
+        )
+        if not lifecycle_df_full.empty
+        else []
+    )
+
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    with filter_col1:
+        selected_workflow = st.multiselect(
+            "Workflow Status",
+            options=workflow_options,
+            default=workflow_options,
+            key="lifecycle_filter_workflow_status",
+        )
+        selected_send = st.multiselect(
+            "Send Status",
+            options=send_options,
+            default=send_options,
+            key="lifecycle_filter_send_status",
+        )
+    with filter_col2:
+        selected_reply = st.multiselect(
+            "Reply Status",
+            options=reply_options,
+            default=reply_options,
+            key="lifecycle_filter_reply_status",
+        )
+        selected_interest = st.multiselect(
+            "Interest Status",
+            options=interest_options,
+            default=interest_options,
+            key="lifecycle_filter_interest_status",
+        )
+    with filter_col3:
+        selected_cities = st.multiselect(
+            "Cities",
+            options=city_options,
+            default=city_options,
+            key="lifecycle_filter_cities",
+        )
+        name_search = st.text_input(
+            "Name Search",
+            value="",
+            key="lifecycle_filter_name_search",
+            placeholder="Optional business name contains...",
+        ).strip()
+
+    if not lifecycle_filtered_df.empty:
+        lifecycle_filtered_df = lifecycle_filtered_df[
+            lifecycle_filtered_df["workflow_status"].isin(selected_workflow)
+        ].copy()
+        lifecycle_filtered_df = lifecycle_filtered_df[
+            lifecycle_filtered_df["send_status"].isin(selected_send)
+        ].copy()
+        lifecycle_filtered_df = lifecycle_filtered_df[
+            lifecycle_filtered_df["reply_status"].isin(selected_reply)
+        ].copy()
+        lifecycle_filtered_df = lifecycle_filtered_df[
+            lifecycle_filtered_df["interest_status"].isin(selected_interest)
+        ].copy()
+        if city_options:
+            lifecycle_filtered_df = lifecycle_filtered_df[
+                lifecycle_filtered_df["search_city"].fillna("").astype(str).str.strip().isin(selected_cities)
+            ].copy()
+        if name_search:
+            lifecycle_filtered_df = lifecycle_filtered_df[
+                lifecycle_filtered_df["name"]
+                .fillna("")
+                .astype(str)
+                .str.contains(name_search, case=False, regex=False)
+            ].copy()
+
+    st.caption(
+        f"Showing {len(lifecycle_filtered_df)} filtered lifecycle row(s) out of {len(lifecycle_df_full)} total."
+    )
+
+    lifecycle_counts = {
+        "pending": 0,
+        "approved": 0,
+        "skipped": 0,
+        "queued_to_send": 0,
+        "sent": 0,
+    }
+    if not lifecycle_filtered_df.empty:
+        status_counts = lifecycle_filtered_df["workflow_status"].value_counts().to_dict()
+        for status_key in lifecycle_counts:
+            lifecycle_counts[status_key] = int(status_counts.get(status_key, 0))
+
+    d1, d2, d3, d4, d5 = st.columns(5)
+    d1.metric("Pending", lifecycle_counts.get("pending", 0))
+    d2.metric("Approved", lifecycle_counts.get("approved", 0))
+    d3.metric("Skipped", lifecycle_counts.get("skipped", 0))
+    d4.metric("Queued To Send", lifecycle_counts.get("queued_to_send", 0))
+    d5.metric("Sent", lifecycle_counts.get("sent", 0))
+    if not lifecycle_filtered_df.empty:
+        replied_count = int((lifecycle_filtered_df["reply_status"] == "replied").sum())
+        interested_count = int((lifecycle_filtered_df["interest_status"] == "interested").sum())
+        not_interested_count = int(
+            (lifecycle_filtered_df["interest_status"] == "not_interested").sum()
+        )
+        meetings_booked_count = int(
+            (lifecycle_filtered_df["interest_status"] == "meeting_booked").sum()
+        )
+    else:
+        replied_count = 0
+        interested_count = 0
+        not_interested_count = 0
+        meetings_booked_count = 0
+
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Replied", replied_count)
+    r2.metric("Interested", interested_count)
+    r3.metric("Not Interested", not_interested_count)
+    r4.metric("Meetings Booked", meetings_booked_count)
+
+    lifecycle_columns = [
+        "name",
+        "search_city",
+        "best_contact_email",
+        "website_opportunity_score",
+        "website_opportunity_label",
+        "workflow_status",
+        "send_status",
+        "reply_status",
+        "replied_at",
+        "interest_status",
+        "meeting_booked_at",
+        "approved_at",
+        "queued_to_send_at",
+        "sent_at",
+    ]
+    lifecycle_table_df = lifecycle_filtered_df.head(20).copy()
+    lifecycle_action_keys = (
+        lifecycle_table_df["lead_key"].fillna("").astype(str).tolist()
+        if not lifecycle_table_df.empty
+        else []
+    )
+    action_col1, action_col2, action_col3 = st.columns(3)
+    with action_col1:
+        clear_reply_clicked = st.button(
+            "Clear Reply State",
+            use_container_width=True,
+            key="lifecycle_action_clear_reply_state",
+            disabled=len(lifecycle_action_keys) == 0,
+        )
+    with action_col2:
+        reset_sent_clicked = st.button(
+            "Reset to Sent",
+            use_container_width=True,
+            key="lifecycle_action_reset_to_sent",
+            disabled=len(lifecycle_action_keys) == 0,
+        )
+    with action_col3:
+        reset_approved_clicked = st.button(
+            "Reset to Approved",
+            use_container_width=True,
+            key="lifecycle_action_reset_to_approved",
+            disabled=len(lifecycle_action_keys) == 0,
+        )
+
+    if clear_reply_clicked or reset_sent_clicked or reset_approved_clicked:
+        action_now = datetime.now().isoformat()
+        updated_rows = 0
+        for row_key in lifecycle_action_keys:
+            target_key = _normalize_outreach_approval_key(row_key)
+            if not target_key:
+                continue
+
+            state_key = target_key if target_key in approval_state else None
+            if state_key is None:
+                for existing_key in approval_state.keys():
+                    if _normalize_outreach_approval_key(existing_key) == target_key:
+                        state_key = existing_key
+                        break
+            if state_key is None:
+                continue
+
+            lead_state = dict(approval_state.get(state_key, {}))
+            previous_state = dict(lead_state)
+            lead_state.setdefault("approved_to_send", False)
+            lead_state.setdefault("skip_this_lead", False)
+            lead_state.setdefault("workflow_status", "pending")
+            lead_state.setdefault("send_status", "not_sent")
+            lead_state.setdefault("sent_at", "")
+            lead_state.setdefault("approved_at", "")
+            lead_state.setdefault("queued_to_send_at", "")
+            lead_state.setdefault("reply_status", "no_reply")
+            lead_state.setdefault("replied_at", "")
+            lead_state.setdefault("interest_status", "unknown")
+            lead_state.setdefault("meeting_booked_at", "")
+            lead_state.setdefault("website_opportunity_score", 0)
+            lead_state.setdefault("website_opportunity_label", "low_opportunity")
+            lead_state.setdefault("review_status", "pending")
+
+            if clear_reply_clicked:
+                lead_state["reply_status"] = "no_reply"
+                lead_state["interest_status"] = "unknown"
+                lead_state["replied_at"] = ""
+                lead_state["meeting_booked_at"] = ""
+            elif reset_sent_clicked:
+                lead_state["workflow_status"] = "sent"
+                lead_state["send_status"] = "sent"
+                lead_state["sent_at"] = str(lead_state.get("sent_at") or "") or action_now
+                lead_state["reply_status"] = "no_reply"
+                lead_state["interest_status"] = "unknown"
+                lead_state["replied_at"] = ""
+                lead_state["meeting_booked_at"] = ""
+                lead_state["approved_to_send"] = True
+                lead_state["skip_this_lead"] = False
+                lead_state["review_status"] = "approved"
+                lead_state["approved_at"] = str(lead_state.get("approved_at") or "") or action_now
+            elif reset_approved_clicked:
+                lead_state["workflow_status"] = "approved"
+                lead_state["send_status"] = "not_sent"
+                lead_state["sent_at"] = ""
+                lead_state["queued_to_send_at"] = ""
+                lead_state["reply_status"] = "no_reply"
+                lead_state["interest_status"] = "unknown"
+                lead_state["replied_at"] = ""
+                lead_state["meeting_booked_at"] = ""
+                lead_state["approved_to_send"] = True
+                lead_state["skip_this_lead"] = False
+                lead_state["review_status"] = "approved"
+                lead_state["approved_at"] = str(lead_state.get("approved_at") or "") or action_now
+
+            if lead_state != previous_state:
+                lead_state["last_reviewed_at"] = action_now
+                approval_state[state_key] = lead_state
+                st.session_state[f"queue_approve_{state_key}"] = bool(
+                    lead_state.get("approved_to_send", False)
+                )
+                st.session_state[f"queue_skip_{state_key}"] = bool(
+                    lead_state.get("skip_this_lead", False)
+                )
+                visible_state = visible_queue_state.get(state_key, {})
+                if visible_state:
+                    visible_state["workflow_status"] = lead_state.get("workflow_status", "pending")
+                    visible_state["send_status"] = lead_state.get("send_status", "not_sent")
+                    visible_state["sent_at"] = lead_state.get("sent_at", "")
+                    visible_state["approved_at"] = lead_state.get("approved_at", "")
+                    visible_state["queued_to_send_at"] = lead_state.get("queued_to_send_at", "")
+                    visible_state["reply_status"] = lead_state.get("reply_status", "no_reply")
+                    visible_state["replied_at"] = lead_state.get("replied_at", "")
+                    visible_state["interest_status"] = lead_state.get("interest_status", "unknown")
+                    visible_state["meeting_booked_at"] = lead_state.get("meeting_booked_at", "")
+                    visible_queue_state[state_key] = visible_state
+                updated_rows += 1
+
+        if updated_rows > 0:
+            save_outreach_approval_state(approval_state)
+            st.success(f"Applied lifecycle action to {updated_rows} filtered row(s).")
+        else:
+            st.info("No filtered rows were updated.")
+
+    if lifecycle_table_df.empty:
+        st.caption("No outreach lifecycle activity saved yet.")
+    else:
+        lifecycle_df = lifecycle_table_df[lifecycle_columns].copy()
+        st.dataframe(lifecycle_df, use_container_width=True, hide_index=True)
+
     st.markdown("---")
     st.subheader("Outreach Queue")
 
@@ -1264,6 +2314,14 @@ def render_full_results(results, export_mode: str):
             ai_score = lead.get("score", "N/A")
             opportunity = lead.get("opportunity", "No opportunity available.")
             website = lead.get("website", "")
+            website_opportunity_score = int(
+                pd.to_numeric(lead.get("website_opportunity_score"), errors="coerce")
+                if pd.notna(pd.to_numeric(lead.get("website_opportunity_score"), errors="coerce"))
+                else 0
+            )
+            website_opportunity_label = str(
+                lead.get("website_opportunity_label", "low_opportunity") or "low_opportunity"
+            )
 
             lead_state_key = _outreach_approval_key(lead)
             lead_state = approval_state.get(lead_state_key, {})
@@ -1288,6 +2346,58 @@ def render_full_results(results, export_mode: str):
 
             workflow_status_display = str(
                 visible_queue_state.get(lead_state_key, {}).get("workflow_status", "pending") or "pending"
+            )
+            send_status_display = str(
+                visible_queue_state.get(lead_state_key, {}).get("send_status", "not_sent") or "not_sent"
+            )
+            approved_at_display = str(
+                visible_queue_state.get(lead_state_key, {}).get("approved_at", "") or ""
+            )
+            queued_to_send_at_display = str(
+                visible_queue_state.get(lead_state_key, {}).get("queued_to_send_at", "") or ""
+            )
+            sent_at_display = str(
+                visible_queue_state.get(lead_state_key, {}).get("sent_at", "") or ""
+            )
+            reply_status_display = str(
+                visible_queue_state.get(lead_state_key, {}).get("reply_status", "no_reply")
+                or "no_reply"
+            )
+            interest_status_display = str(
+                visible_queue_state.get(lead_state_key, {}).get("interest_status", "unknown")
+                or "unknown"
+            )
+            replied_at_display = str(
+                visible_queue_state.get(lead_state_key, {}).get("replied_at", "") or ""
+            )
+            meeting_booked_at_display = str(
+                visible_queue_state.get(lead_state_key, {}).get("meeting_booked_at", "") or ""
+            )
+            approved_at_html = (
+                f"<div style='margin-bottom:8px;'><strong>Approved At:</strong> {approved_at_display}</div>"
+                if approved_at_display
+                else ""
+            )
+            queued_to_send_at_html = (
+                f"<div style='margin-bottom:8px;'><strong>Queued To Send At:</strong> {queued_to_send_at_display}</div>"
+                if queued_to_send_at_display
+                else ""
+            )
+            sent_at_html = (
+                f"<div style='margin-bottom:8px;'><strong>Sent At:</strong> {sent_at_display}</div>"
+                if sent_at_display
+                else ""
+            )
+            replied_at_html = (
+                f"<div style='margin-bottom:8px;'><strong>Replied At:</strong> {replied_at_display}</div>"
+                if replied_at_display
+                else ""
+            )
+            meeting_booked_at_html = (
+                "<div style='margin-bottom:8px;'><strong>Meeting Booked At:</strong> "
+                f"{meeting_booked_at_display}</div>"
+                if meeting_booked_at_display
+                else ""
             )
 
             st.markdown(
@@ -1318,7 +2428,17 @@ def render_full_results(results, export_mode: str):
                     <div style="margin-bottom:8px;"><strong>Best Contact Email:</strong> {best_contact_email if best_contact_email else "Not found"}</div>
                     <div style="margin-bottom:8px;"><strong>Contact Email Quality:</strong> {contact_email_quality if contact_email_quality else "none"}</div>
                     <div style="margin-bottom:8px;"><strong>AI Score:</strong> {ai_score}</div>
+                    <div style="margin-bottom:8px;"><strong>Website Opportunity Score:</strong> {website_opportunity_score}</div>
+                    <div style="margin-bottom:8px;"><strong>Website Opportunity Label:</strong> {website_opportunity_label}</div>
                     <div style="margin-bottom:8px;"><strong>Workflow Status:</strong> {workflow_status_display}</div>
+                    <div style="margin-bottom:8px;"><strong>Send Status:</strong> {send_status_display}</div>
+                    <div style="margin-bottom:8px;"><strong>Reply Status:</strong> {reply_status_display}</div>
+                    <div style="margin-bottom:8px;"><strong>Interest Status:</strong> {interest_status_display}</div>
+                    {approved_at_html}
+                    {queued_to_send_at_html}
+                    {sent_at_html}
+                    {replied_at_html}
+                    {meeting_booked_at_html}
                     <div style="margin-bottom:10px;"><strong>Opportunity Summary:</strong> {opportunity}</div>
                 </div>
                 """,
@@ -1377,9 +2497,20 @@ def render_full_results(results, export_mode: str):
             lead_state["website"] = str(lead.get("website", "") or "")
             lead_state["search_city"] = str(lead.get("search_city", "") or "")
             lead_state["best_contact_email"] = str(lead.get("best_contact_email", "") or "")
+            lead_state["website_opportunity_score"] = int(
+                pd.to_numeric(lead.get("website_opportunity_score"), errors="coerce")
+                if pd.notna(pd.to_numeric(lead.get("website_opportunity_score"), errors="coerce"))
+                else 0
+            )
+            lead_state["website_opportunity_label"] = str(
+                lead.get("website_opportunity_label", "low_opportunity") or "low_opportunity"
+            )
+            previous_workflow_status = str(previous_state.get("workflow_status", "") or "").strip().lower()
             if lead_state["approved_to_send"]:
                 lead_state["review_status"] = "approved"
-                if str(previous_state.get("workflow_status", "") or "").strip().lower() != "queued_to_send":
+                if previous_workflow_status == "sent":
+                    lead_state["workflow_status"] = "sent"
+                elif previous_workflow_status != "queued_to_send":
                     lead_state["workflow_status"] = "approved"
                     lead_state["queued_to_send_at"] = ""
                 else:
@@ -1398,6 +2529,25 @@ def render_full_results(results, export_mode: str):
                 lead_state["workflow_status"] = "pending"
                 lead_state["queued_to_send_at"] = ""
                 lead_state["approved_at"] = str(previous_state.get("approved_at", "") or "")
+
+            if str(lead_state.get("workflow_status", "")).strip().lower() == "sent":
+                lead_state["send_status"] = "sent"
+                lead_state["sent_at"] = str(previous_state.get("sent_at", "") or "") or datetime.now().isoformat()
+                lead_state["reply_status"] = str(previous_state.get("reply_status", "no_reply") or "no_reply")
+                lead_state["replied_at"] = str(previous_state.get("replied_at", "") or "")
+                lead_state["interest_status"] = str(
+                    previous_state.get("interest_status", "unknown") or "unknown"
+                )
+                lead_state["meeting_booked_at"] = str(
+                    previous_state.get("meeting_booked_at", "") or ""
+                )
+            else:
+                lead_state["send_status"] = "not_sent"
+                lead_state["sent_at"] = ""
+                lead_state["reply_status"] = "no_reply"
+                lead_state["replied_at"] = ""
+                lead_state["interest_status"] = "unknown"
+                lead_state["meeting_booked_at"] = ""
 
             tracked_fields = (
                 "approved_to_send",
@@ -1445,6 +2595,91 @@ def render_full_results(results, export_mode: str):
                         use_container_width=True,
                     )
 
+            if str(lead_state.get("workflow_status", "")).strip().lower() == "sent":
+                st.caption("Simulate Lead Response")
+                response_col1, response_col2 = st.columns(2)
+                with response_col1:
+                    simulate_reply_clicked = st.button(
+                        "Simulate Reply",
+                        key=f"queue_sim_reply_{state_key}",
+                        use_container_width=True,
+                    )
+                    simulate_not_interested_clicked = st.button(
+                        "Simulate Not Interested",
+                        key=f"queue_sim_not_interested_{state_key}",
+                        use_container_width=True,
+                    )
+                with response_col2:
+                    simulate_interested_clicked = st.button(
+                        "Simulate Interested",
+                        key=f"queue_sim_interested_{state_key}",
+                        use_container_width=True,
+                    )
+                    simulate_meeting_clicked = st.button(
+                        "Simulate Meeting Booked",
+                        key=f"queue_sim_meeting_{state_key}",
+                        use_container_width=True,
+                    )
+
+                if (
+                    simulate_reply_clicked
+                    or simulate_interested_clicked
+                    or simulate_not_interested_clicked
+                    or simulate_meeting_clicked
+                ):
+                    response_now = datetime.now().isoformat()
+                    if simulate_reply_clicked:
+                        lead_state["reply_status"] = "replied"
+                        lead_state["replied_at"] = lead_state.get("replied_at") or response_now
+                        lead_state["interest_status"] = "unknown"
+                        lead_state["meeting_booked_at"] = ""
+                    elif simulate_interested_clicked:
+                        lead_state["reply_status"] = "replied"
+                        lead_state["replied_at"] = lead_state.get("replied_at") or response_now
+                        lead_state["interest_status"] = "interested"
+                        lead_state["meeting_booked_at"] = ""
+                    elif simulate_not_interested_clicked:
+                        lead_state["reply_status"] = "replied"
+                        lead_state["replied_at"] = lead_state.get("replied_at") or response_now
+                        lead_state["interest_status"] = "not_interested"
+                        lead_state["meeting_booked_at"] = ""
+                    elif simulate_meeting_clicked:
+                        lead_state["reply_status"] = "replied"
+                        lead_state["replied_at"] = lead_state.get("replied_at") or response_now
+                        lead_state["interest_status"] = "meeting_booked"
+                        lead_state["meeting_booked_at"] = (
+                            lead_state.get("meeting_booked_at") or response_now
+                        )
+
+                    if lead_state.get("reply_status") != "replied":
+                        lead_state["replied_at"] = ""
+                        lead_state["interest_status"] = "unknown"
+                    if lead_state.get("interest_status") not in {
+                        "unknown",
+                        "interested",
+                        "not_interested",
+                        "meeting_booked",
+                    }:
+                        lead_state["interest_status"] = "unknown"
+                    if lead_state.get("interest_status") != "meeting_booked":
+                        lead_state["meeting_booked_at"] = ""
+
+                    lead_state["last_reviewed_at"] = response_now
+                    approval_state[lead_state_key] = lead_state
+                    current_visible_state = visible_queue_state.get(lead_state_key, {})
+                    current_visible_state["reply_status"] = str(
+                        lead_state.get("reply_status", "no_reply") or "no_reply"
+                    )
+                    current_visible_state["replied_at"] = str(lead_state.get("replied_at", "") or "")
+                    current_visible_state["interest_status"] = str(
+                        lead_state.get("interest_status", "unknown") or "unknown"
+                    )
+                    current_visible_state["meeting_booked_at"] = str(
+                        lead_state.get("meeting_booked_at", "") or ""
+                    )
+                    visible_queue_state[lead_state_key] = current_visible_state
+                    approval_state_changed = True
+
             st.markdown("---")
 
         if approval_state_changed:
@@ -1472,6 +2707,8 @@ def render_full_results(results, export_mode: str):
         contact_email_score = lead.get("contact_email_score", 0)
         lead_priority_score = lead.get("lead_priority_score", 0)
         lead_priority_label = lead.get("lead_priority_label", "none")
+        website_opportunity_score = lead.get("website_opportunity_score", 0)
+        website_opportunity_label = lead.get("website_opportunity_label", "low_opportunity")
 
         score_color = _score_badge_color(score)
         status_color = _status_badge_color(status)
@@ -1528,6 +2765,12 @@ def render_full_results(results, export_mode: str):
                     <strong>Priority Label:</strong> {lead_priority_label if lead_priority_label else "none"}
                 </div>
                 <div style="margin-bottom:10px;">
+                    <strong>Website Opportunity Score:</strong> {website_opportunity_score}
+                </div>
+                <div style="margin-bottom:10px;">
+                    <strong>Website Opportunity Label:</strong> {website_opportunity_label if website_opportunity_label else "low_opportunity"}
+                </div>
+                <div style="margin-bottom:10px;">
                     <strong>Website:</strong> <a href="{website}" target="_blank">{website}</a>
                 </div>
                 <div>
@@ -1559,6 +2802,8 @@ def render_full_results(results, export_mode: str):
             contact_email_score = lead.get("contact_email_score", 0)
             lead_priority_score = lead.get("lead_priority_score", 0)
             lead_priority_label = lead.get("lead_priority_label", "none")
+            website_opportunity_score = lead.get("website_opportunity_score", 0)
+            website_opportunity_label = lead.get("website_opportunity_label", "low_opportunity")
 
             score_color = _score_badge_color(score)
             status_color = _status_badge_color(status)
@@ -1613,6 +2858,12 @@ def render_full_results(results, export_mode: str):
                     </div>
                     <div style="margin-bottom:10px;">
                         <strong>Priority Label:</strong> {lead_priority_label if lead_priority_label else "none"}
+                    </div>
+                    <div style="margin-bottom:10px;">
+                        <strong>Website Opportunity Score:</strong> {website_opportunity_score}
+                    </div>
+                    <div style="margin-bottom:10px;">
+                        <strong>Website Opportunity Label:</strong> {website_opportunity_label if website_opportunity_label else "low_opportunity"}
                     </div>
                     <div style="margin-bottom:10px;">
                         <strong>Website:</strong> <a href="{website}" target="_blank">{website}</a>
@@ -1792,7 +3043,31 @@ with st.sidebar:
     )
     max_results = st.number_input("Max Leads", min_value=1, max_value=100, value=5)
     outreach_limit = st.number_input("Outreach Limit", min_value=1, max_value=100, value=5)
-    min_score = st.slider("Minimum Score", min_value=1, max_value=10, value=5)
+    min_score = st.slider("Minimum AI Score", min_value=1, max_value=10, value=5)
+    max_score = st.slider("Maximum AI Score", min_value=min_score, max_value=10, value=10)
+    min_opportunity_score = st.slider(
+        "Minimum Opportunity Score",
+        min_value=0,
+        max_value=100,
+        value=0,
+    )
+    high_opportunity_only = st.checkbox("High Opportunity Only", value=False)
+    require_missing_booking = st.checkbox("Require Missing Booking", value=False)
+    require_missing_live_chat = st.checkbox("Require Missing Live Chat", value=False)
+    require_website = st.checkbox("Require Website", value=False)
+    min_contact_email_quality_score = st.number_input(
+        "Minimum Contact Email Quality Score",
+        min_value=0,
+        max_value=10,
+        value=0,
+    )
+    min_google_reviews = st.number_input(
+        "Minimum Google Reviews (if available)",
+        min_value=0,
+        max_value=100000,
+        value=0,
+        step=1,
+    )
     export_mode = st.selectbox(
         "Export Mode", ["Outreach Ready", "Lead List Only", "CRM Upload"]
     )
@@ -1811,6 +3086,14 @@ if run_clicked:
             max_results=int(max_results),
             outreach_limit=int(outreach_limit),
             min_score=int(min_score),
+            max_score=int(max_score),
+            min_opportunity_score=int(min_opportunity_score),
+            high_opportunity_only=bool(high_opportunity_only),
+            require_missing_booking=bool(require_missing_booking),
+            require_missing_live_chat=bool(require_missing_live_chat),
+            require_website=bool(require_website),
+            min_contact_email_quality_score=int(min_contact_email_quality_score),
+            min_google_reviews=int(min_google_reviews),
             progress_bar=progress_bar,
             status_text=status_text,
         )
