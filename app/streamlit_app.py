@@ -30,6 +30,7 @@ from src.scoring.lead_scorer import score_leads
 load_dotenv()
 
 geolocator = Nominatim(user_agent="ai_lead_generation_agents")
+OUTREACH_APPROVAL_STATE_PATH = PROJECT_ROOT / "data" / "outreach_approval_state.csv"
 
 
 def _safe_filename(value: str) -> str:
@@ -250,6 +251,167 @@ def _lead_identity(lead: dict) -> str:
     return f"name_addr_city:{name}|{address}|{city}"
 
 
+def _outreach_approval_key(lead: dict) -> str:
+    name = str(lead.get("name") or "")
+    website = str(lead.get("website") or "")
+    city = str(lead.get("search_city") or "")
+    best_contact_email = str(lead.get("best_contact_email") or "").strip()
+    fallback_email = str(lead.get("email") or "").strip()
+    contact_email = best_contact_email if best_contact_email else fallback_email
+    return f"{name}|{website}|{city}|{contact_email}"
+
+
+def _to_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _to_text(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value)
+
+
+def load_outreach_approval_state() -> dict[str, dict[str, Any]]:
+    if not OUTREACH_APPROVAL_STATE_PATH.exists():
+        return {}
+
+    try:
+        df = pd.read_csv(OUTREACH_APPROVAL_STATE_PATH)
+    except Exception:
+        return {}
+
+    if df.empty:
+        return {}
+
+    loaded_state: dict[str, dict[str, Any]] = {}
+    for _, row in df.iterrows():
+        lead_key = _to_text(row.get("lead_key")).strip()
+        if not lead_key:
+            name = _to_text(row.get("name"))
+            website = _to_text(row.get("website"))
+            city = _to_text(row.get("search_city"))
+            best_contact_email = _to_text(row.get("best_contact_email"))
+            lead_key = f"{name}|{website}|{city}|{best_contact_email}"
+        if not lead_key:
+            continue
+
+        approved_to_send = _to_bool(row.get("approved_to_send"))
+        skip_this_lead = _to_bool(row.get("skip_this_lead"))
+        if approved_to_send:
+            skip_this_lead = False
+
+        loaded_state[lead_key] = {
+            "name": _to_text(row.get("name")),
+            "website": _to_text(row.get("website")),
+            "search_city": _to_text(row.get("search_city")),
+            "best_contact_email": _to_text(row.get("best_contact_email")),
+            "approved_to_send": approved_to_send,
+            "skip_this_lead": skip_this_lead,
+            "edited_subject": _to_text(row.get("edited_subject")),
+            "edited_email": _to_text(row.get("edited_email")),
+            "edited_cta": _to_text(row.get("edited_cta")),
+            "review_status": _to_text(row.get("review_status")),
+            "workflow_status": _to_text(row.get("workflow_status")),
+            "approved_at": _to_text(row.get("approved_at")),
+            "queued_to_send_at": _to_text(row.get("queued_to_send_at")),
+            "last_reviewed_at": _to_text(row.get("last_reviewed_at")),
+        }
+
+        current = loaded_state[lead_key]
+        if current["workflow_status"] not in {"pending", "approved", "skipped", "queued_to_send"}:
+            if approved_to_send:
+                current["workflow_status"] = "approved"
+            elif skip_this_lead:
+                current["workflow_status"] = "skipped"
+            else:
+                current["workflow_status"] = "pending"
+
+    return loaded_state
+
+
+def save_outreach_approval_state(approval_state: dict[str, dict[str, Any]]) -> None:
+    OUTREACH_APPROVAL_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+    columns = [
+        "lead_key",
+        "name",
+        "website",
+        "search_city",
+        "best_contact_email",
+        "approved_to_send",
+        "skip_this_lead",
+        "edited_subject",
+        "edited_email",
+        "edited_cta",
+        "review_status",
+        "workflow_status",
+        "approved_at",
+        "queued_to_send_at",
+        "last_reviewed_at",
+    ]
+    rows = []
+    for lead_key, state in approval_state.items():
+        approved_to_send = bool(state.get("approved_to_send", False))
+        skip_this_lead = bool(state.get("skip_this_lead", False))
+        if approved_to_send:
+            skip_this_lead = False
+
+        if approved_to_send:
+            review_status = "approved"
+        elif skip_this_lead:
+            review_status = "skipped"
+        else:
+            review_status = "pending"
+
+        workflow_status = str(state.get("workflow_status") or "").strip().lower()
+        if skip_this_lead:
+            workflow_status = "skipped"
+        elif approved_to_send:
+            if workflow_status not in {"approved", "queued_to_send"}:
+                workflow_status = "approved"
+        else:
+            workflow_status = "pending"
+
+        rows.append(
+            {
+                "lead_key": lead_key,
+                "name": str(state.get("name") or ""),
+                "website": str(state.get("website") or ""),
+                "search_city": str(state.get("search_city") or ""),
+                "best_contact_email": str(state.get("best_contact_email") or ""),
+                "approved_to_send": approved_to_send,
+                "skip_this_lead": skip_this_lead,
+                "edited_subject": str(state.get("edited_subject") or ""),
+                "edited_email": str(state.get("edited_email") or ""),
+                "edited_cta": str(state.get("edited_cta") or ""),
+                "review_status": review_status,
+                "workflow_status": workflow_status,
+                "approved_at": str(state.get("approved_at") or ""),
+                "queued_to_send_at": str(state.get("queued_to_send_at") or ""),
+                "last_reviewed_at": str(state.get("last_reviewed_at") or ""),
+            }
+        )
+
+    try:
+        pd.DataFrame(rows, columns=columns).to_csv(OUTREACH_APPROVAL_STATE_PATH, index=False)
+    except Exception:
+        pass
+
+
+def _sync_outreach_approval_flags(approve_key: str, skip_key: str, changed_field: str) -> None:
+    if changed_field == "approve" and bool(st.session_state.get(approve_key, False)):
+        st.session_state[skip_key] = False
+    elif changed_field == "skip" and bool(st.session_state.get(skip_key, False)):
+        st.session_state[approve_key] = False
+
+
 def _dedupe_discovered_leads(raw_leads_all: list[dict]) -> list[dict]:
     deduped = []
     seen_keys = set()
@@ -272,7 +434,19 @@ def _build_filtered_views(ready_leads: list[dict], min_score: int):
     if "score" in df.columns:
         df["score_numeric"] = pd.to_numeric(df["score"], errors="coerce")
         filtered_df = df[df["score_numeric"] >= min_score].copy()
-        filtered_df = filtered_df.sort_values(by="score_numeric", ascending=False)
+        if "lead_priority_score" in filtered_df.columns:
+            filtered_df["lead_priority_score_numeric"] = pd.to_numeric(
+                filtered_df["lead_priority_score"], errors="coerce"
+            )
+            if filtered_df["lead_priority_score_numeric"].notna().any():
+                filtered_df = filtered_df.sort_values(
+                    by=["lead_priority_score_numeric", "score_numeric"],
+                    ascending=[False, False],
+                )
+            else:
+                filtered_df = filtered_df.sort_values(by="score_numeric", ascending=False)
+        else:
+            filtered_df = filtered_df.sort_values(by="score_numeric", ascending=False)
     else:
         filtered_df = df.copy()
 
@@ -710,6 +884,8 @@ def _render_export_controls(filtered_df: pd.DataFrame, export_mode: str):
             "best_contact_email",
             "contact_email_quality",
             "contact_email_score",
+            "lead_priority_score",
+            "lead_priority_label",
             "contact_page_url",
             "subject",
             "email",
@@ -737,6 +913,8 @@ def _render_export_controls(filtered_df: pd.DataFrame, export_mode: str):
             "best_contact_email",
             "contact_email_quality",
             "contact_email_score",
+            "lead_priority_score",
+            "lead_priority_label",
             "contact_page_url",
             "contactability_status",
         ]
@@ -761,6 +939,8 @@ def _render_export_controls(filtered_df: pd.DataFrame, export_mode: str):
             "best_contact_email",
             "contact_email_quality",
             "contact_email_score",
+            "lead_priority_score",
+            "lead_priority_label",
             "contact_page_url",
         ]
         export_df = export_df[[c for c in crm_columns if c in export_df.columns]].copy()
@@ -800,6 +980,476 @@ def render_full_results(results, export_mode: str):
 
     render_pipeline_results(results)
 
+    queue_df = filtered_df.copy()
+    if "contactability_status" not in queue_df.columns:
+        queue_df["contactability_status"] = ""
+    if "email" not in queue_df.columns:
+        queue_df["email"] = ""
+    queue_df = queue_df[
+        (
+            queue_df["contactability_status"].fillna("").astype(str).str.lower().str.strip()
+            == "ready"
+        )
+        & (queue_df["email"].fillna("").astype(str).str.strip() != "")
+    ].copy()
+
+    if "lead_priority_score" in queue_df.columns:
+        queue_df["lead_priority_score_numeric"] = pd.to_numeric(
+            queue_df["lead_priority_score"], errors="coerce"
+        ).fillna(0)
+        queue_df = queue_df.sort_values(
+            by="lead_priority_score_numeric",
+            ascending=False,
+        )
+    elif "score" in queue_df.columns:
+        queue_df["score_numeric"] = pd.to_numeric(queue_df["score"], errors="coerce").fillna(0)
+        queue_df = queue_df.sort_values(by="score_numeric", ascending=False)
+
+    if queue_df.empty:
+        visible_queue_df = queue_df.copy()
+    else:
+        queue_limit = st.slider(
+            "Queue Size",
+            min_value=5,
+            max_value=50,
+            value=10,
+            key="outreach_queue_limit",
+        )
+        visible_queue_df = queue_df.head(int(queue_limit)).copy()
+
+    approval_state = st.session_state.setdefault("outreach_approval_state", {})
+    approval_state_changed = False
+    for lead in visible_queue_df.to_dict(orient="records"):
+        lead_state_key = _outreach_approval_key(lead)
+        default_subject = str(lead.get("subject", "") or "")
+        default_email = str(lead.get("email", "") or "")
+        default_cta = str(lead.get("cta", "") or "")
+        lead_name = str(lead.get("name", "") or "")
+        lead_website = str(lead.get("website", "") or "")
+        lead_city = str(lead.get("search_city", "") or "")
+        lead_best_contact_email = str(lead.get("best_contact_email", "") or "")
+
+        if lead_state_key not in approval_state:
+            approval_state[lead_state_key] = {
+                "approved_to_send": False,
+                "skip_this_lead": False,
+                "edited_subject": default_subject,
+                "edited_email": default_email,
+                "edited_cta": default_cta,
+                "name": lead_name,
+                "website": lead_website,
+                "search_city": lead_city,
+                "best_contact_email": lead_best_contact_email,
+                "review_status": "pending",
+                "workflow_status": "pending",
+                "approved_at": "",
+                "queued_to_send_at": "",
+                "last_reviewed_at": "",
+            }
+            approval_state_changed = True
+        else:
+            previous_defaults_state = dict(approval_state[lead_state_key])
+            approval_state[lead_state_key].setdefault("approved_to_send", False)
+            approval_state[lead_state_key].setdefault("skip_this_lead", False)
+            approval_state[lead_state_key].setdefault("edited_subject", default_subject)
+            approval_state[lead_state_key].setdefault("edited_email", default_email)
+            approval_state[lead_state_key].setdefault("edited_cta", default_cta)
+            approval_state[lead_state_key].setdefault("name", lead_name)
+            approval_state[lead_state_key].setdefault("website", lead_website)
+            approval_state[lead_state_key].setdefault("search_city", lead_city)
+            approval_state[lead_state_key].setdefault("best_contact_email", lead_best_contact_email)
+            approval_state[lead_state_key].setdefault("review_status", "pending")
+            approval_state[lead_state_key].setdefault("workflow_status", "pending")
+            approval_state[lead_state_key].setdefault("approved_at", "")
+            approval_state[lead_state_key].setdefault("queued_to_send_at", "")
+            approval_state[lead_state_key].setdefault("last_reviewed_at", "")
+            if previous_defaults_state != approval_state[lead_state_key]:
+                approval_state_changed = True
+
+    visible_queue_state: dict[str, dict[str, Any]] = {}
+    approved_count = 0
+    skipped_count = 0
+    for lead in visible_queue_df.to_dict(orient="records"):
+        lead_state_key = _outreach_approval_key(lead)
+        base_state = approval_state.get(lead_state_key, {})
+        state_key = lead_state_key
+
+        approve_key = f"queue_approve_{state_key}"
+        skip_key = f"queue_skip_{state_key}"
+        subject_key = f"queue_subject_{state_key}"
+        email_key = f"queue_email_{state_key}"
+        cta_key = f"queue_cta_{state_key}"
+
+        approved_to_send = bool(
+            st.session_state.get(approve_key, base_state.get("approved_to_send", False))
+        )
+        skip_this_lead = bool(
+            st.session_state.get(skip_key, base_state.get("skip_this_lead", False))
+        )
+        if approved_to_send and skip_this_lead:
+            skip_this_lead = False
+
+        workflow_status = str(base_state.get("workflow_status") or "").strip().lower()
+        if workflow_status not in {"pending", "approved", "skipped", "queued_to_send"}:
+            if approved_to_send:
+                workflow_status = "approved"
+            elif skip_this_lead:
+                workflow_status = "skipped"
+            else:
+                workflow_status = "pending"
+
+        visible_queue_state[lead_state_key] = {
+            "approved_to_send": approved_to_send,
+            "skip_this_lead": skip_this_lead,
+            "workflow_status": workflow_status,
+            "approved_at": str(base_state.get("approved_at", "") or ""),
+            "queued_to_send_at": str(base_state.get("queued_to_send_at", "") or ""),
+            "edited_subject": str(
+                st.session_state.get(subject_key, base_state.get("edited_subject", "")) or ""
+            ),
+            "edited_email": str(
+                st.session_state.get(email_key, base_state.get("edited_email", "")) or ""
+            ),
+            "edited_cta": str(
+                st.session_state.get(cta_key, base_state.get("edited_cta", "")) or ""
+            ),
+        }
+
+        if approved_to_send:
+            approved_count += 1
+        elif skip_this_lead:
+            skipped_count += 1
+    total_visible_queue = len(visible_queue_df)
+    ready_for_review_count = total_visible_queue - approved_count - skipped_count
+
+    st.markdown("---")
+    st.subheader("Approval Summary")
+    s1, s2, s3, s4 = st.columns(4)
+    s1.metric("Approved To Send", approved_count)
+    s2.metric("Skipped", skipped_count)
+    s3.metric("Ready For Review", ready_for_review_count)
+    s4.metric("Total Visible Queue", total_visible_queue)
+
+    if st.button(
+        "Mark Visible Approved as Queued To Send",
+        use_container_width=True,
+        key="mark_visible_approved_queued_to_send",
+        disabled=visible_queue_df.empty,
+    ):
+        queued_now = datetime.now().isoformat()
+        queued_count = 0
+        for lead in visible_queue_df.to_dict(orient="records"):
+            lead_state_key = _outreach_approval_key(lead)
+            lead_state = approval_state.get(lead_state_key, {})
+            current_visible_state = visible_queue_state.get(lead_state_key, {})
+            if not current_visible_state.get("approved_to_send", False):
+                continue
+
+            previous_state = dict(lead_state)
+            lead_state["workflow_status"] = "queued_to_send"
+            if not str(lead_state.get("approved_at", "") or ""):
+                lead_state["approved_at"] = queued_now
+            if not str(lead_state.get("queued_to_send_at", "") or ""):
+                lead_state["queued_to_send_at"] = queued_now
+
+            approval_state[lead_state_key] = lead_state
+            current_visible_state["workflow_status"] = "queued_to_send"
+            current_visible_state["approved_at"] = str(lead_state.get("approved_at", "") or "")
+            current_visible_state["queued_to_send_at"] = str(
+                lead_state.get("queued_to_send_at", "") or ""
+            )
+            visible_queue_state[lead_state_key] = current_visible_state
+            if previous_state != lead_state:
+                approval_state_changed = True
+            queued_count += 1
+
+        if queued_count > 0:
+            st.success(f"Queued {queued_count} visible approved lead(s) for future sending.")
+        else:
+            st.info("No visible approved leads to queue.")
+
+    approved_export_rows = []
+    for lead in visible_queue_df.to_dict(orient="records"):
+        lead_state = visible_queue_state.get(_outreach_approval_key(lead), {})
+        if not lead_state.get("approved_to_send", False):
+            continue
+        row = {
+            "name": lead.get("name", ""),
+            "website": lead.get("website", ""),
+            "search_city": lead.get("search_city", ""),
+            "best_contact_email": lead.get("best_contact_email", ""),
+            "lead_priority_score": lead.get("lead_priority_score", 0),
+            "lead_priority_label": lead.get("lead_priority_label", "none"),
+            "subject": lead_state.get("edited_subject", ""),
+            "email": lead_state.get("edited_email", ""),
+            "cta": lead_state.get("edited_cta", ""),
+            "workflow_status": lead_state.get("workflow_status", ""),
+            "approved_to_send": True,
+        }
+        approved_export_rows.append(row)
+
+    approved_export_columns = [
+        "name",
+        "website",
+        "search_city",
+        "best_contact_email",
+        "lead_priority_score",
+        "lead_priority_label",
+        "subject",
+        "email",
+        "cta",
+        "workflow_status",
+    ]
+    approved_export_columns.append("approved_to_send")
+
+    approved_export_df = pd.DataFrame(approved_export_rows)
+    if approved_export_df.empty:
+        approved_export_df = pd.DataFrame(columns=approved_export_columns)
+    else:
+        approved_export_df = approved_export_df[approved_export_columns]
+
+    st.download_button(
+        label="Download Approved Outreach CSV",
+        data=approved_export_df.to_csv(index=False).encode("utf-8"),
+        file_name="approved_outreach.csv",
+        mime="text/csv",
+        use_container_width=True,
+        key="download_approved_outreach_csv",
+    )
+
+    st.markdown("---")
+    st.subheader("Outreach Queue")
+
+    if queue_df.empty:
+        st.info("No ready leads available for the outreach queue.")
+    else:
+        st.caption(
+            f"Showing {len(visible_queue_df)} of {len(queue_df)} ready lead(s), sorted by priority."
+        )
+
+        queue_export_columns = [
+            "name",
+            "website",
+            "search_city",
+            "best_contact_email",
+            "contact_email_quality",
+            "lead_priority_score",
+            "lead_priority_label",
+            "score",
+            "opportunity",
+            "subject",
+            "email",
+            "cta",
+        ]
+        queue_export_df = visible_queue_df[
+            [c for c in queue_export_columns if c in visible_queue_df.columns]
+        ].copy()
+        queue_csv_data = queue_export_df.to_csv(index=False).encode("utf-8")
+        st.download_button(
+            label="Download Outreach Queue CSV",
+            data=queue_csv_data,
+            file_name="outreach_queue.csv",
+            mime="text/csv",
+            use_container_width=True,
+            key="download_outreach_queue_csv",
+        )
+
+        for lead in visible_queue_df.to_dict(orient="records"):
+            name = lead.get("name", "Unknown Lead")
+            city = lead.get("search_city", "")
+            priority_score = lead.get("lead_priority_score", 0)
+            priority_label = lead.get("lead_priority_label", "none")
+            best_contact_email = lead.get("best_contact_email", "")
+            contact_email_quality = lead.get("contact_email_quality", "none")
+            ai_score = lead.get("score", "N/A")
+            opportunity = lead.get("opportunity", "No opportunity available.")
+            website = lead.get("website", "")
+
+            lead_state_key = _outreach_approval_key(lead)
+            lead_state = approval_state.get(lead_state_key, {})
+
+            state_key = lead_state_key
+            approve_key = f"queue_approve_{state_key}"
+            skip_key = f"queue_skip_{state_key}"
+            subject_key = f"queue_subject_{state_key}"
+            email_key = f"queue_email_{state_key}"
+            cta_key = f"queue_cta_{state_key}"
+
+            if approve_key not in st.session_state:
+                st.session_state[approve_key] = bool(lead_state.get("approved_to_send", False))
+            if skip_key not in st.session_state:
+                st.session_state[skip_key] = bool(lead_state.get("skip_this_lead", False))
+            if subject_key not in st.session_state:
+                st.session_state[subject_key] = str(lead_state.get("edited_subject", "") or "")
+            if email_key not in st.session_state:
+                st.session_state[email_key] = str(lead_state.get("edited_email", "") or "")
+            if cta_key not in st.session_state:
+                st.session_state[cta_key] = str(lead_state.get("edited_cta", "") or "")
+
+            workflow_status_display = str(
+                visible_queue_state.get(lead_state_key, {}).get("workflow_status", "pending") or "pending"
+            )
+
+            st.markdown(
+                f"""
+                <div class="opportunity-card">
+                    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+                        <div style="font-size:1.1rem; font-weight:700;">{name}</div>
+                        <div style="display:flex; gap:8px;">
+                            <span style="
+                                background:#0ea5e9;
+                                color:white;
+                                padding:6px 10px;
+                                border-radius:999px;
+                                font-size:0.85rem;
+                                font-weight:600;
+                            ">Priority: {priority_score}</span>
+                            <span style="
+                                background:#16a34a;
+                                color:white;
+                                padding:6px 10px;
+                                border-radius:999px;
+                                font-size:0.85rem;
+                                font-weight:600;
+                            ">{priority_label}</span>
+                        </div>
+                    </div>
+                    <div style="margin-bottom:8px;"><strong>City:</strong> {city if city else "N/A"}</div>
+                    <div style="margin-bottom:8px;"><strong>Best Contact Email:</strong> {best_contact_email if best_contact_email else "Not found"}</div>
+                    <div style="margin-bottom:8px;"><strong>Contact Email Quality:</strong> {contact_email_quality if contact_email_quality else "none"}</div>
+                    <div style="margin-bottom:8px;"><strong>AI Score:</strong> {ai_score}</div>
+                    <div style="margin-bottom:8px;"><strong>Workflow Status:</strong> {workflow_status_display}</div>
+                    <div style="margin-bottom:10px;"><strong>Opportunity Summary:</strong> {opportunity}</div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+            control_col1, control_col2 = st.columns(2)
+            with control_col1:
+                st.checkbox(
+                    "Approved to Send",
+                    key=approve_key,
+                    on_change=_sync_outreach_approval_flags,
+                    args=(approve_key, skip_key, "approve"),
+                )
+            with control_col2:
+                st.checkbox(
+                    "Skip This Lead",
+                    key=skip_key,
+                    on_change=_sync_outreach_approval_flags,
+                    args=(approve_key, skip_key, "skip"),
+                )
+
+            approved_to_send = bool(st.session_state.get(approve_key, False))
+            skip_this_lead = bool(st.session_state.get(skip_key, False))
+            if approved_to_send and skip_this_lead:
+                # Safety fallback without mutating widget-backed keys in render flow.
+                skip_this_lead = False
+
+            if approved_to_send:
+                queue_status_label = "Approved"
+                queue_status_color = "#16a34a"
+            elif skip_this_lead:
+                queue_status_label = "Skipped"
+                queue_status_color = "#dc2626"
+            else:
+                queue_status_label = "Pending Review"
+                queue_status_color = "#f59e0b"
+
+            st.markdown(
+                f"<div style='margin-bottom:10px; font-weight:600; color:{queue_status_color};'>"
+                f"Status: {queue_status_label}</div>",
+                unsafe_allow_html=True,
+            )
+
+            st.text_area("Subject", key=subject_key, height=80)
+            st.text_area("Email Body", key=email_key, height=180)
+            st.text_area("CTA", key=cta_key, height=80)
+
+            previous_state = dict(lead_state)
+            lead_state["approved_to_send"] = approved_to_send
+            lead_state["skip_this_lead"] = skip_this_lead
+            lead_state["edited_subject"] = str(st.session_state.get(subject_key, "") or "")
+            lead_state["edited_email"] = str(st.session_state.get(email_key, "") or "")
+            lead_state["edited_cta"] = str(st.session_state.get(cta_key, "") or "")
+            lead_state["name"] = str(lead.get("name", "") or "")
+            lead_state["website"] = str(lead.get("website", "") or "")
+            lead_state["search_city"] = str(lead.get("search_city", "") or "")
+            lead_state["best_contact_email"] = str(lead.get("best_contact_email", "") or "")
+            if lead_state["approved_to_send"]:
+                lead_state["review_status"] = "approved"
+                if str(previous_state.get("workflow_status", "") or "").strip().lower() != "queued_to_send":
+                    lead_state["workflow_status"] = "approved"
+                    lead_state["queued_to_send_at"] = ""
+                else:
+                    lead_state["workflow_status"] = "queued_to_send"
+                if not str(previous_state.get("approved_at", "") or ""):
+                    lead_state["approved_at"] = datetime.now().isoformat()
+                else:
+                    lead_state["approved_at"] = str(previous_state.get("approved_at", "") or "")
+            elif lead_state["skip_this_lead"]:
+                lead_state["review_status"] = "skipped"
+                lead_state["workflow_status"] = "skipped"
+                lead_state["queued_to_send_at"] = ""
+                lead_state["approved_at"] = str(previous_state.get("approved_at", "") or "")
+            else:
+                lead_state["review_status"] = "pending"
+                lead_state["workflow_status"] = "pending"
+                lead_state["queued_to_send_at"] = ""
+                lead_state["approved_at"] = str(previous_state.get("approved_at", "") or "")
+
+            tracked_fields = (
+                "approved_to_send",
+                "skip_this_lead",
+                "edited_subject",
+                "edited_email",
+                "edited_cta",
+            )
+            if any(previous_state.get(field) != lead_state.get(field) for field in tracked_fields):
+                lead_state["last_reviewed_at"] = datetime.now().isoformat()
+            else:
+                lead_state["last_reviewed_at"] = str(previous_state.get("last_reviewed_at", "") or "")
+
+            approval_state[lead_state_key] = lead_state
+            if previous_state != lead_state:
+                approval_state_changed = True
+
+            action_col1, action_col2, action_col3 = st.columns(3)
+            with action_col1:
+                if st.button(
+                    "Copy Subject",
+                    key=f"queue_copy_subject_{state_key}",
+                    use_container_width=True,
+                ):
+                    st.caption("Subject is available in the editable field above for copy.")
+            with action_col2:
+                if st.button(
+                    "Copy Email",
+                    key=f"queue_copy_email_{state_key}",
+                    use_container_width=True,
+                ):
+                    st.caption("Email body is available in the editable field above for copy.")
+            with action_col3:
+                if website:
+                    st.link_button(
+                        "Open Website",
+                        website,
+                        use_container_width=True,
+                    )
+                else:
+                    st.button(
+                        "Open Website",
+                        key=f"queue_open_website_{state_key}",
+                        disabled=True,
+                        use_container_width=True,
+                    )
+
+            st.markdown("---")
+
+        if approval_state_changed:
+            save_outreach_approval_state(approval_state)
+
     st.markdown("---")
     st.subheader(f"Top Opportunities ({len(outreach_df)})")
     st.caption(
@@ -820,6 +1470,8 @@ def render_full_results(results, export_mode: str):
         best_contact_email = lead.get("best_contact_email", "")
         contact_email_quality = lead.get("contact_email_quality", "none")
         contact_email_score = lead.get("contact_email_score", 0)
+        lead_priority_score = lead.get("lead_priority_score", 0)
+        lead_priority_label = lead.get("lead_priority_label", "none")
 
         score_color = _score_badge_color(score)
         status_color = _status_badge_color(status)
@@ -870,6 +1522,12 @@ def render_full_results(results, export_mode: str):
                     <strong>Contact Email Score:</strong> {contact_email_score}
                 </div>
                 <div style="margin-bottom:10px;">
+                    <strong>Priority Score:</strong> {lead_priority_score}
+                </div>
+                <div style="margin-bottom:10px;">
+                    <strong>Priority Label:</strong> {lead_priority_label if lead_priority_label else "none"}
+                </div>
+                <div style="margin-bottom:10px;">
                     <strong>Website:</strong> <a href="{website}" target="_blank">{website}</a>
                 </div>
                 <div>
@@ -899,6 +1557,8 @@ def render_full_results(results, export_mode: str):
             best_contact_email = lead.get("best_contact_email", "")
             contact_email_quality = lead.get("contact_email_quality", "none")
             contact_email_score = lead.get("contact_email_score", 0)
+            lead_priority_score = lead.get("lead_priority_score", 0)
+            lead_priority_label = lead.get("lead_priority_label", "none")
 
             score_color = _score_badge_color(score)
             status_color = _status_badge_color(status)
@@ -949,6 +1609,12 @@ def render_full_results(results, export_mode: str):
                         <strong>Contact Email Score:</strong> {contact_email_score}
                     </div>
                     <div style="margin-bottom:10px;">
+                        <strong>Priority Score:</strong> {lead_priority_score}
+                    </div>
+                    <div style="margin-bottom:10px;">
+                        <strong>Priority Label:</strong> {lead_priority_label if lead_priority_label else "none"}
+                    </div>
+                    <div style="margin-bottom:10px;">
                         <strong>Website:</strong> <a href="{website}" target="_blank">{website}</a>
                     </div>
                     <div>
@@ -996,6 +1662,12 @@ def render_full_results(results, export_mode: str):
 
                 st.write("**Contact Email Score**")
                 st.write(lead.get("contact_email_score", 0))
+
+                st.write("**Priority Score**")
+                st.write(lead.get("lead_priority_score", 0))
+
+                st.write("**Priority Label**")
+                st.write(lead.get("lead_priority_label", "") or "none")
 
                 st.write("**Contact Page URL**")
                 st.write(lead.get("contact_page_url", "") or "Not found")
@@ -1078,6 +1750,8 @@ if "last_run_metadata" not in st.session_state:
     st.session_state.last_run_metadata = None
 if "map_city_selection" not in st.session_state:
     st.session_state.map_city_selection = "All Cities"
+if "outreach_approval_state" not in st.session_state:
+    st.session_state.outreach_approval_state = load_outreach_approval_state()
 
 st.markdown(
     """
