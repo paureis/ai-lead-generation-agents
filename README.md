@@ -1,39 +1,199 @@
 # AI Lead Generation Agents
 
-End-to-end AI lead generation workflow for local businesses:
-- discovers leads from Google Maps
+End-to-end **AI-powered lead generation platform** for discovering, analyzing, and contacting local businesses.
+
+The system automatically:
+- discovers local business leads from Google Maps
 - enriches websites and contact data
-- scores opportunities
-- generates outreach drafts
-- supports human approval in a Streamlit UI
-- persists outreach review state to CSV
+- scores business opportunities using AI
+- generates personalized outreach drafts
+- allows human review and approval
+- exports outreach-ready lead lists
+- runs in a cloud-hosted Streamlit dashboard
+
+The application is now successfully deployed using **Docker + AWS ECS Fargate** and can be run on-demand for demos.
+
+---
+
+## Live Demo
+
+The system is deployed on **AWS ECS Fargate**.
+
+Because the infrastructure runs in on-demand demo mode, the instance is started only when needed.
+
+To request a live demo:
+
+Contact: `alvaro.reis@email.com`
+
+When active, the application is available at:
+
+`http://<ecs-public-ip>:8501`
+
+---
 
 ## What The App Does Today
 
 ### Core pipeline
-1. Lead discovery (SerpAPI Google Maps)
-2. Website enrichment (signals, SEO, contact emails, tech hints)
-3. AI lead scoring
-4. Outreach generation (with an audit-style outreach template)
-5. Contactability review
 
-### Additional scoring layers
-- `contact_email_quality` and `contact_email_score` (deterministic, based on email prefix quality)
-- `lead_priority_score` and `lead_priority_label` (deterministic 0-100 prioritization)
-- `website_opportunity_score` and `website_opportunity_label` (deterministic website opportunity scoring)
+1. **Lead Discovery**
+   - Uses SerpAPI Google Maps search
+2. **Website Enrichment**
+   - website scraping
+   - SEO signals
+   - contact email extraction
+   - tech stack hints
+3. **AI Lead Scoring**
+   - uses OpenAI models to identify growth opportunities
+4. **Outreach Generation**
+   - AI-generated outreach drafts
+   - structured audit-style messaging
+5. **Contactability Review**
+   - deterministic checks for reachable contacts
 
-### Streamlit UI (simplified operational layout)
-- Title and run summary
-- Pipeline Results metrics
-- Lead Map with city jump selector (`All Cities` + per-city selection)
-- Approval Summary
-- Download Approved Outreach CSV
-- Outreach Queue
-- Top Opportunities
-- Other Scored Leads
-- Lead Details + Growth Report PDF download
+---
 
-The UI intentionally removes experimental/testing-heavy sections such as stage timings and the lifecycle dashboard table.
+## Additional Scoring Layers
+
+Deterministic scoring layers improve prioritization.
+
+### Email quality scoring
+
+- `contact_email_quality`
+- `contact_email_score`
+
+Evaluates prefixes such as:
+- `info@`
+- `hello@`
+- `support@`
+- `sales@`
+
+### Lead priority scoring
+
+- `lead_priority_score`
+- `lead_priority_label`
+
+Scores leads from `0-100` using:
+- AI score
+- contactability
+- opportunity signals
+
+### Website opportunity scoring
+
+- `website_opportunity_score`
+- `website_opportunity_label`
+
+Signals include:
+
+| Signal | Score |
+|---|---|
+| Missing booking system | +35 |
+| Missing contact form | +20 |
+| Missing live chat | +15 |
+| SEO weaknesses | +10 |
+| Weak tech stack | +5 |
+
+---
+
+## Streamlit Dashboard
+
+Operational UI built with **Streamlit**.
+
+### Main dashboard sections
+
+- Pipeline run summary
+- Lead map visualization
+- Approval summary
+- Outreach queue
+- Top opportunities
+- Other scored leads
+- Lead detail expanders
+- Growth report PDF export
+
+Note: the app intentionally does **not** include stage timings, queue-size slider, or lifecycle dashboard bulk actions in the current UI.
+
+---
+
+## Streamlit UI Features
+
+### Sidebar controls
+
+- Niches
+- Cities
+- Maximum leads
+- Outreach limit
+- Minimum opportunity score
+- High opportunity only
+- Require missing booking
+- Require missing live chat
+- Require website
+- Export mode
+
+### Lead map
+
+Interactive map powered by **PyDeck** with:
+- dark-themed map
+- multi-city discovery
+- city jump selector
+- `All Cities` view
+- coordinate fallback geocoding
+
+### Outreach queue
+
+The queue includes only leads where:
+- `contactability_status == "ready"`
+- generated `email` exists (non-empty after strip)
+
+Sorting:
+- `lead_priority_score` descending
+- fallback: `score` descending
+
+Per-lead actions:
+- Approve to send
+- Skip lead
+- Edit subject
+- Edit email
+- Edit CTA
+- Copy helpers
+- Open business website
+
+---
+
+## Outreach Approval Persistence
+
+Human review state persists between runs.
+
+Stored in:
+
+`data/outreach_approval_state.csv`
+
+Stable lead key:
+
+`name|website|search_city|best_contact_email`
+
+Stored metadata includes:
+- approval flags
+- edited outreach text
+- workflow status
+- send status
+- reply status
+- timestamps
+
+---
+
+## Exports
+
+### Export modes
+- Outreach Ready
+- Lead List Only
+- CRM Upload
+
+### Queue exports
+- Outreach Queue CSV
+- Approved Outreach CSV
+
+Edited outreach text is preserved in exports.
+
+---
 
 ## Pipeline Architecture
 
@@ -41,10 +201,10 @@ The UI intentionally removes experimental/testing-heavy sections such as stage t
 flowchart TD
     A[Lead Discovery<br/>SerpAPI Google Maps] --> B[Website Enrichment<br/>Requests + BeautifulSoup]
     B --> C[AI Lead Scoring<br/>OpenAI]
-    C --> D[Outreach Generation<br/>OpenAI + deterministic template]
-    D --> E[Contactability Review<br/>rule-based]
-    E --> F[Deterministic prioritization layers<br/>email quality + priority + website opportunity]
-    F --> G[Streamlit Review UI<br/>map + queue + approvals + exports]
+    C --> D[Outreach Generation<br/>AI + deterministic template]
+    D --> E[Contactability Review<br/>rule based]
+    E --> F[Deterministic prioritization<br/>email quality + priority + website opportunity]
+    F --> G[Streamlit Review UI]
 
     A --> A1[data/leads_raw.csv]
     B --> B1[data/leads_enriched.csv]
@@ -54,70 +214,63 @@ flowchart TD
     G --> G1[data/outreach_approval_state.csv]
 ```
 
-## Streamlit Features
+---
 
-### Sidebar controls
-- Niches (multi-line)
-- Cities (multi-line)
-- Max Leads
-- Outreach Limit
-- Minimum Opportunity Score
-- High Opportunity Only
-- Require Missing Booking
-- Require Missing Live Chat
-- Require Website
-- Export Mode (`Outreach Ready`, `Lead List Only`, `CRM Upload`)
+## Cloud Deployment Architecture
 
-### Map behavior
-- Renders leads on a dark pydeck map
-- Supports city jump selector
-- Supports `All Cities` view centered by plotted lead coordinates
-- Uses available coordinates and geocoding fallback for missing coordinates
+The application is containerized and deployed on AWS ECS Fargate.
 
-### Outreach Queue behavior
-- Shows only leads where:
-  - `contactability_status == "ready"`
-  - generated `email` is non-empty
-- Sorted by:
-  - `lead_priority_score` descending (fallback to `score` if needed)
-- Per-lead controls:
-  - `Approved to Send` / `Skip This Lead` (mutually exclusive)
-  - editable `subject`, `email`, `cta`
-  - copy helpers + open website button
-- Per-lead review state is persisted in session and CSV
+```text
+Internet
+  ->
+Public IP
+  ->
+ECS Fargate Task
+  ->
+Docker Container
+  ->
+Streamlit App (Port 8501)
+```
 
-## Outreach Approval Persistence
+Key infrastructure components:
+- Docker container
+- AWS ECS Fargate
+- AWS ECR container registry
+- AWS Secrets Manager
+- ECS security groups
+- public IP networking
 
-Approval/review state is persisted to:
+---
 
-`data/outreach_approval_state.csv`
+## Deployment Workflow (On-Demand Demo Mode)
 
-Stable key per lead:
+The demo is designed to run on-demand to minimize cloud costs.
 
-`name|website|search_city|best_contact_email` (with fallback handling)
+### Start demo
+1. ECS -> Cluster -> `ai-leadgen-service`
+2. Update Service
+3. Set desired tasks = `1`
+4. Wait about 60 seconds
+5. Find public IP:
+   - ECS -> Tasks -> Networking
+6. Open:
+   - `http://PUBLIC-IP:8501`
 
-Persisted state includes operational fields such as:
-- approval flags (`approved_to_send`, `skip_this_lead`)
-- edited outreach content (`edited_subject`, `edited_email`, `edited_cta`)
-- workflow/send/reply metadata (`workflow_status`, `send_status`, `reply_status`, etc.)
-- timestamps (`approved_at`, `queued_to_send_at`, `sent_at`, `replied_at`, `meeting_booked_at`, `last_reviewed_at`)
+### Stop demo
+1. Update Service
+2. Set desired tasks = `0`
 
-Loader/saver logic deduplicates by `lead_key` and keeps the latest record per lead.
+This stops compute usage when idle.
 
-## Exports
+### Cost profile
+- Idle: `$0`
+- Running (demo mode): approximately `$0.02/hour` (varies by region/configuration)
 
-### Main export modes
-- Outreach Ready
-- Lead List Only
-- CRM Upload
-
-### Queue exports
-- Outreach Queue CSV (currently visible queue rows)
-- Approved Outreach CSV (approved visible queue rows, using edited subject/email/cta values)
+---
 
 ## Data Outputs
 
-Generated CSV files:
+Pipeline generates:
 - `data/leads_raw.csv`
 - `data/leads_enriched.csv`
 - `data/leads_scored.csv`
@@ -125,12 +278,15 @@ Generated CSV files:
 - `data/leads_ready.csv`
 - `data/outreach_approval_state.csv`
 
+---
+
 ## Project Structure
 
 ```text
 ai-lead-generation-agents/
 |- app/
-|  \- streamlit_app.py
+|  |- streamlit_app.py
+|  \- auth_gate.py
 |- data/
 |  |- leads_raw.csv
 |  |- leads_enriched.csv
@@ -155,73 +311,120 @@ ai-lead-generation-agents/
 |  \- outreach/
 |     |- email_generator.py
 |     \- contactability.py
+|- .github/workflows/
+|  \- build-and-push.yml
 |- .env.example
 |- requirements.txt
+|- Dockerfile
 |- README.md
 \- LICENSE
 ```
 
+---
+
 ## Setup
 
-### 1. Clone
+### Clone
 
 ```bash
 git clone https://github.com/paureis/ai-lead-generation-agents.git
 cd ai-lead-generation-agents
 ```
 
-### 2. Install dependencies
+### Install dependencies
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configure environment
+### Configure environment variables
 
-Create `.env` in project root:
-
-```bash
-OPENAI_API_KEY=<your_key_here>
-SERPAPI_API_KEY=<your_key_here>
-```
-
-Or copy:
+Create a `.env` file:
 
 ```bash
-cp .env.example .env
+OPENAI_API_KEY: <your_key>
+SERPAPI_API_KEY: <your_key>
+APP_BASIC_AUTH_USERNAME: <username>
+APP_BASIC_AUTH_PASSWORD: <password>
 ```
 
-## Run
+In production, these values are loaded from AWS Secrets Manager.
 
-### Streamlit app (recommended)
+---
+
+## Run Locally
+
+Start the Streamlit dashboard:
 
 ```bash
 streamlit run app/streamlit_app.py
 ```
 
-### CLI pipeline
+Run pipeline via CLI:
 
 ```bash
 python scripts/run_pipeline.py
 ```
 
+---
+
+## Docker Deployment
+
+Build container:
+
+```bash
+docker build -t ai-leadgen .
+```
+
+Run locally:
+
+```bash
+docker run --rm -p 8501:8501 --env-file .env ai-leadgen
+```
+
+---
+
 ## Tech Stack
 
+### Backend
 - Python
-- Streamlit
 - Pandas
+- Requests
+- BeautifulSoup
+
+### AI
 - OpenAI API
-- SerpAPI
-- BeautifulSoup + Requests
-- Geopy
+
+### Data source
+- SerpAPI Google Maps
+
+### Visualization
+- Streamlit
 - PyDeck
+- Geopy
+
+### Reporting
 - ReportLab
 
-## Notes
+### Infrastructure
+- Docker
+- AWS ECS Fargate
+- AWS ECR
+- AWS Secrets Manager
 
-- No real email sending is implemented yet.
-- Approval and outreach editing are human-in-the-loop.
-- Operational state survives reruns/restarts via CSV persistence.
+---
+
+## Future Improvements
+
+Planned improvements:
+- automated outreach sending
+- CRM integrations
+- lead database persistence
+- SaaS multi-user support
+- automated scheduling
+- analytics dashboards
+
+---
 
 ## License
 
