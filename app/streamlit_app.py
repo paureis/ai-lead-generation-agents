@@ -22,6 +22,11 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+try:
+    from app.auth_gate import enforce_basic_auth
+except ImportError:
+    from auth_gate import enforce_basic_auth
+
 from src.enrichment.website_enricher import enrich_leads
 from src.lead_sources.serpapi_maps import save_leads_to_csv, search_google_maps
 from src.outreach.contactability import evaluate_contactability_batch
@@ -2482,6 +2487,8 @@ def render_full_results(results, export_mode: str):
 
 
 st.set_page_config(page_title="AI Lead Generation Agents", layout="wide")
+enforce_basic_auth()
+
 if "pipeline_results" not in st.session_state:
     st.session_state.pipeline_results = None
 if "last_run_metadata" not in st.session_state:
